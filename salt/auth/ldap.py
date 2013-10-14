@@ -84,11 +84,15 @@ class _LDAPConnection(object):
             if no_verify:
                 ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT,
                                 ldap.OPT_X_TLS_NEVER)
-            if self.tls:
-                schema = 'ldaps'
-            self.ldap = ldap.initialize(
-                '{0}://{1}:{2}'.format(schema, self.server, self.port)
-            )
+            if self.server:
+                if self.tls:
+                    schema = 'ldaps'
+                self.ldap = ldap.initialize(
+                    '{0}://{1}:{2}'.format(schema, self.server, self.port)
+                )
+            else:
+                self.ldap = ldap.initialize(uri)
+
             self.ldap.protocol_version = 3  # ldap.VERSION3
             self.ldap.set_option(ldap.OPT_REFERRALS, 0)  # Needed for AD
 
