@@ -65,11 +65,12 @@ class _LDAPConnection(object):
     Setup an LDAP connection.
     '''
 
-    def __init__(self, server, port, tls, no_verify, binddn, bindpw,
+    def __init__(self, uri, server, port, tls, no_verify, binddn, bindpw,
                  anonymous):
         '''
-        Bind to an LDAP directory using passed credentials.
+        Initialize an LDAP object (validate server data and if provided, credentials).
         '''
+        self.uri = uri
         self.server = server
         self.port = port
         self.tls = tls
