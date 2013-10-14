@@ -147,10 +147,6 @@ def auth(username, password):
 
     for param in params['additional']:
         paramvalues[param] = _config(param, mandatory=False)
-        #try:
-        #    paramvalues[param] = _config(param)
-        #except SaltInvocationError:
-        #    pass
 
     if paramvalues['binddn']:
         # the binddn can also be composited, e.g.
