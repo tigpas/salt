@@ -112,7 +112,7 @@ def auth(username, password):
     # config params (auth.ldap.*)
     params = {
             'mandatory': ['no_verify', 'anonymous'],
-            'additional': ['server', 'port', 'tls', 'binddn', 'bindpw', 'filter'],
+            'additional': ['uri', 'server', 'port', 'tls', 'binddn', 'bindpw', 'filter'],
     }
 
     paramvalues = {}
