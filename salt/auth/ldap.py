@@ -90,8 +90,8 @@ class _LDAPConnection(object):
                 self.ldap = ldap.initialize(
                     '{0}://{1}:{2}'.format(schema, self.server, self.port)
                 )
-            else:
-                self.ldap = ldap.initialize(uri)
+            elif self.uri:
+                self.ldap = ldap.initialize(self.uri)
 
             self.ldap.protocol_version = 3  # ldap.VERSION3
             self.ldap.set_option(ldap.OPT_REFERRALS, 0)  # Needed for AD
@@ -99,11 +99,31 @@ class _LDAPConnection(object):
             if not anonymous:
                 self.ldap.simple_bind_s(self.binddn, self.bindpw)
         except Exception as ldap_error:
-            raise CommandExecutionError(
-                'Failed to bind to LDAP server {0}:{1} as {2}: {3}'.format(
-                    self.server, self.port, self.binddn, ldap_error
-                )
-            )
+            errmsg = 'Failed to initialize the LDAP object'
+            if not self.server:
+                if self.binddn and not anonymous:
+                    errmsg = 'Failed to bind to LDAP URI {0} as {1}: {2}'.format(
+                            self.uri, self.binddn, ldap_error
+                        )
+                elif anonymous:
+                    errmsg = 'Failed to initialize LDAP object with URI {0}: {1}'.format(
+                            self.uri, ldap_error
+                        )
+            elif self.server:
+                if self.binddn and not anonymous:
+                    errmsg = 'Failed to bind to ldap server {0} as {1}: {2}'.format(
+                            self.server, self.binddn, ldap_error
+                        )
+                elif anonymous:
+                    errmsg = 'Failed to initialize LDAP object with {0}:{1}: {2}'.format(
+                            self.server, self.port, ldap_error
+                        )
+
+            if self.server and self.binddn and not anonymous:
+                errmsg = 'Failed to bind to LDAP server {0}:{1} as {2}: {3}'.format(
+                        self.server, self.port, self.binddn, ldap_error
+                    )
+            raise CommandExecutionError(errmsg)
 
 
 def auth(username, password):
