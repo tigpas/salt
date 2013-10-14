@@ -111,8 +111,8 @@ def auth(username, password):
     connargs = {}
     # config params (auth.ldap.*)
     params = {
-            'mandatory': ['server', 'port', 'tls', 'no_verify', 'anonymous'],
-            'additional': ['binddn', 'bindpw', 'filter'],
+            'mandatory': ['no_verify', 'anonymous'],
+            'additional': ['server', 'port', 'tls', 'binddn', 'bindpw', 'filter'],
     }
 
     paramvalues = {}
