@@ -24,9 +24,9 @@ except ImportError:
     HAS_LDAP = False
 
 # Defaults, override in master config
-__defopts__ = {'auth.ldap.server': 'localhost',
-               'auth.ldap.port': '389',
+__defopts__ = {'auth.ldap.port': '389',
                'auth.ldap.tls': False,
+               'auth.ldap.uri': 'ldap://localhost:389',
                'auth.ldap.no_verify': False,
                'auth.ldap.anonymous': False,
                'auth.ldap.scope': 2
