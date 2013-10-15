@@ -71,8 +71,8 @@ class _LDAPConnection(object):
         '''
         Initialize an LDAP object (validate server data and if provided, credentials).
         '''
-        self.binddn = binddn
-        self.bindpw = bindpw
+        self.binddn = kwargs['binddn']
+        self.bindpw = kwargs['bindpw']
         schema = 'ldap'
         if not HAS_LDAP:
             raise CommandExecutionError('Failed to connect to LDAP, module '
