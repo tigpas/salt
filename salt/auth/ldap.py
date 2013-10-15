@@ -71,7 +71,6 @@ class _LDAPConnection(object):
         '''
         Initialize an LDAP object (validate server data and if provided, credentials).
         '''
-        #self.tls = tls
         self.binddn = binddn
         self.bindpw = bindpw
         schema = 'ldap'
