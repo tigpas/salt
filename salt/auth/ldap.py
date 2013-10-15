@@ -67,33 +67,39 @@ class _LDAPConnection(object):
 
     #def __init__(self, uri, server, port, tls, no_verify, binddn, bindpw,
     #             anonymous):
-    def __init__(self, uri, **kwargs):
+    def __init__(self, **kwargs):
         '''
         Initialize an LDAP object (validate server data and if provided, credentials).
         '''
-        self.uri = uri
-        self.server = server
-        self.port = port
-        self.tls = tls
+        #self.tls = tls
         self.binddn = binddn
         self.bindpw = bindpw
         schema = 'ldap'
         if not HAS_LDAP:
             raise CommandExecutionError('Failed to connect to LDAP, module '
                                         'not loaded')
+
+        if kwargs['server']:
+            self.server = kwargs['server']
+            if kwargs['port']:
+                self.port = kwargs['port']
+            else:
+                self.port = _config('port')
+            self.port = kwargs['port']
+            if kwargs['tls']:
+                self.tls = kwargs['tls']
+                schema = 'ldaps'
+            self.uri = '{0}://{1}:{2}'.format(schema, self.server, self.port)
+        elif kwargs['uri']:
+            self.uri = kwargs['uri']
+        else:
+            self.uri = _config('uri')
+
         try:
             if no_verify:
                 ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT,
                                 ldap.OPT_X_TLS_NEVER)
-            if self.server:
-                if self.tls:
-                    schema = 'ldaps'
-                self.ldap = ldap.initialize(
-                    '{0}://{1}:{2}'.format(schema, self.server, self.port)
-                )
-            elif self.uri:
-                self.ldap = ldap.initialize(self.uri)
-
+            self.ldap = ldap.initialize(self.uri)
             self.ldap.protocol_version = 3  # ldap.VERSION3
             self.ldap.set_option(ldap.OPT_REFERRALS, 0)  # Needed for AD
 
