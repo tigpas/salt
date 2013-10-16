@@ -149,7 +149,7 @@ def auth(username, password):
     Authenticate via an LDAP bind
     '''
     # Get config params; create connection dictionary
-    basedn       = _config('basedn')
+    basedn       = _config('basedn', mandatory=False)
     scope        = _config('scope')
     anonymous    = _config('anonymous')
     searchfilter = _config('filter', variables={'username': username})
