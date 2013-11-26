@@ -5,7 +5,6 @@ The networking module for RHEL/Fedora based distros
 
 # Import python libs
 import logging
-import re
 import os.path
 import os
 import StringIO
@@ -17,6 +16,7 @@ import jinja2.exceptions
 # Import salt libs
 import salt.utils
 import salt.utils.templates
+import salt.utils.validate.net
 
 # Set up logging
 log = logging.getLogger(__name__)
@@ -28,13 +28,16 @@ JINJA = jinja2.Environment(
     )
 )
 
+# Define the module's virtual name
+__virtualname__ = 'ip'
+
 
 def __virtual__():
     '''
     Confine this module to RHEL/Fedora based distros
     '''
     if __grains__['os_family'] == 'RedHat':
-        return 'ip'
+        return __virtualname__
     return False
 
 
@@ -60,7 +63,6 @@ _RH_CONFIG_BONDING_OPTS = [
 _RH_NETWORK_SCRIPT_DIR = '/etc/sysconfig/network-scripts'
 _RH_NETWORK_FILE = '/etc/sysconfig/network'
 _RH_NETWORK_CONF_FILES = '/etc/modprobe.d'
-_MAC_REGEX = re.compile('([0-9A-F]{1,2}:){5}[0-9A-F]{1,2}')
 _CONFIG_TRUE = ['yes', 'on', 'true', '1', True]
 _CONFIG_FALSE = ['no', 'off', 'false', '0', False]
 _IFACE_TYPES = [
@@ -575,7 +577,7 @@ def _parse_settings_eth(opts, iface_type, enabled, iface):
 
     if iface_type not in ['bond', 'vlan', 'bridge']:
         if 'addr' in opts:
-            if _MAC_REGEX.match(opts['addr']):
+            if salt.utils.validate.net.mac(opts['addr']):
                 result['addr'] = opts['addr']
             else:
                 _raise_error_iface(iface, opts['addr'], ['AA:BB:CC:DD:EE:FF'])
@@ -611,6 +613,16 @@ def _parse_settings_eth(opts, iface_type, enabled, iface):
     for opt in ['ipaddr', 'master', 'netmask', 'srcaddr', 'delay', 'domain', 'gateway']:
         if opt in opts:
             result[opt] = opts[opt]
+
+    for opt in ['ipv6addr', 'ipv6gateway']:
+        if opt in opts:
+            result[opt] = opts[opt]
+
+    if 'ipv6_autoconf' in opts:
+        result['ipv6_autoconf'] = opts['ipv6_autoconf']
+
+    if 'enable_ipv6' in opts:
+        result['enable_ipv6'] = opts['enable_ipv6']
 
     valid = _CONFIG_TRUE + _CONFIG_FALSE
     for opt in ['peerdns', 'slave', 'vlan', 'defroute']:
@@ -810,7 +822,7 @@ def build_bond(iface, **settings):
         log.error('Could not load template conf.jinja')
         return ''
     data = template.render({'name': iface, 'bonding': opts})
-    _write_file_iface(iface, data, _RH_NETWORK_CONF_FILES, '{0}.conf')
+    _write_file_iface(iface, data, _RH_NETWORK_CONF_FILES, '{0}.conf'.format(iface))
     path = os.path.join(_RH_NETWORK_CONF_FILES, '{0}.conf'.format(iface))
     if rh_major == '5':
         __salt__['cmd.run'](

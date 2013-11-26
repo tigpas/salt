@@ -50,7 +50,7 @@ import salt.utils.event
 import salt.utils.verify
 import salt.utils.minions
 import salt.utils.gzip_util
-from salt.utils.debug import enable_sigusr1_handler
+from salt.utils.debug import enable_sigusr1_handler, inspect_stack
 from salt.exceptions import SaltMasterError, MasterExit
 from salt.utils.event import tagify
 
@@ -190,6 +190,7 @@ class Master(SMaster):
         fileserver = salt.fileserver.Fileserver(self.opts)
         runners = salt.loader.runner(self.opts)
         schedule = salt.utils.schedule.Schedule(self.opts, runners)
+        ckminions = salt.utils.minions.CkMinions(self.opts)
         while True:
             now = int(time.time())
             loop_interval = int(self.opts['loop_interval'])
@@ -241,6 +242,11 @@ class Master(SMaster):
                     'Exception {0} occurred in scheduled job'.format(exc)
                 )
             last = now
+            log.debug(
+                'ckminions.connected_ids: {0}'.format(
+                    ckminions.connected_ids()
+                )
+            )
             try:
                 time.sleep(loop_interval)
             except KeyboardInterrupt:
@@ -406,11 +412,11 @@ class Publisher(multiprocessing.Process):
         pub_sock = context.socket(zmq.PUB)
         # if 2.1 >= zmq < 3.0, we only have one HWM setting
         try:
-            pub_sock.setsockopt(zmq.HWM, self.opts.get('pub_hwm', 1))
+            pub_sock.setsockopt(zmq.HWM, self.opts.get('pub_hwm', 100))
         # in zmq >= 3.0, there are separate send and receive HWM settings
         except AttributeError:
-            pub_sock.setsockopt(zmq.SNDHWM, self.opts.get('pub_hwm', 1))
-            pub_sock.setsockopt(zmq.RCVHWM, self.opts.get('pub_hwm', 1))
+            pub_sock.setsockopt(zmq.SNDHWM, self.opts.get('pub_hwm', 100))
+            pub_sock.setsockopt(zmq.RCVHWM, self.opts.get('pub_hwm', 100))
         if self.opts['ipv6'] is True and hasattr(zmq, 'IPV4ONLY'):
             # IPv6 sockets work for both IPv6 and IPv4 addresses
             pub_sock.setsockopt(zmq.IPV4ONLY, 0)
@@ -542,11 +548,10 @@ class ReqServer(object):
             log.info('Halite: Starting up ...')
             self.halite = Halite(self.opts['halite'])
             self.halite.start()
+        elif 'halite' in self.opts:
+            log.info('Halite: Not configured, skipping.')
         else:
-            log.info('Halite: Not starting. '
-                     'Package available is {0}. '
-                     'Opts for "halite" exists is {1}.'
-                     .format(HAS_HALITE, 'halite' in self.opts))
+            log.debug('Halite: Unavailable.')
 
     def run(self):
         '''
@@ -799,6 +804,7 @@ class AESFuncs(object):
                 ).format(clear_load['id'])
             )
             return False
+        clear_load.pop('tok')
         perms = []
         for match in self.opts['peer']:
             if re.match(match, clear_load['id']):
@@ -831,6 +837,25 @@ class AESFuncs(object):
             return {}
         if not salt.utils.verify.valid_id(self.opts, load['id']):
             return {}
+        if 'tok' not in load:
+            log.error(
+                'Received incomplete call from {0} for {1!r}, missing {2!r}'
+                .format(
+                    load['id'],
+                    inspect_stack()['co_name'],
+                    'tok'
+                ))
+            return False
+        if not self.__verify_minion(load['id'], load['tok']):
+            # The minion is not who it says it is!
+            # We don't want to listen to it!
+            log.warn(
+                'Minion id {0} is not who it says it is!'.format(
+                    load['id']
+                )
+            )
+            return {}
+        load.pop('tok')
         ret = {}
         # The old ext_nodes method is set to be deprecated in 0.10.4
         # and should be removed within 3-5 releases in favor of the
@@ -849,15 +874,15 @@ class AESFuncs(object):
                         stdout=subprocess.PIPE
                         ).communicate()[0])
             if 'environment' in ndata:
-                env = ndata['environment']
+                saltenv = ndata['environment']
             else:
-                env = 'base'
+                saltenv = 'base'
 
             if 'classes' in ndata:
                 if isinstance(ndata['classes'], dict):
-                    ret[env] = list(ndata['classes'])
+                    ret[saltenv] = list(ndata['classes'])
                 elif isinstance(ndata['classes'], list):
-                    ret[env] = ndata['classes']
+                    ret[saltenv] = ndata['classes']
                 else:
                     return ret
         # Evaluate all configured master_tops interfaces
@@ -890,9 +915,9 @@ class AESFuncs(object):
         mopts = {}
         file_roots = {}
         envs = self._file_envs()
-        for env in envs:
-            if env not in file_roots:
-                file_roots[env] = []
+        for saltenv in envs:
+            if saltenv not in file_roots:
+                file_roots[saltenv] = []
         mopts['file_roots'] = file_roots
         if load.get('env_only'):
             return mopts
@@ -902,6 +927,8 @@ class AESFuncs(object):
         mopts['nodegroups'] = self.opts['nodegroups']
         mopts['state_auto_order'] = self.opts['state_auto_order']
         mopts['state_events'] = self.opts['state_events']
+        mopts['jinja_lstrip_blocks'] = self.opts['jinja_lstrip_blocks']
+        mopts['jinja_trim_blocks'] = self.opts['jinja_trim_blocks']
         return mopts
 
     def _mine_get(self, load):
@@ -910,6 +937,25 @@ class AESFuncs(object):
         '''
         if any(key not in load for key in ('id', 'tgt', 'fun')):
             return {}
+        if 'tok' not in load:
+            log.error(
+                'Received incomplete call from {0} for {1!r}, missing {2!r}'
+                .format(
+                    load['id'],
+                    inspect_stack()['co_name'],
+                    'tok'
+                ))
+            return False
+        if not self.__verify_minion(load['id'], load['tok']):
+            # The minion is not who it says it is!
+            # We don't want to listen to it!
+            log.warn(
+                'Minion id {0} is not who it says it is!'.format(
+                    load['id']
+                )
+            )
+            return {}
+        load.pop('tok')
         if 'mine_get' in self.opts:
             # If master side acl defined.
             if not isinstance(self.opts['mine_get'], dict):
@@ -952,6 +998,25 @@ class AESFuncs(object):
             return False
         if not salt.utils.verify.valid_id(self.opts, load['id']):
             return False
+        if 'tok' not in load:
+            log.error(
+                'Received incomplete call from {0} for {1!r}, missing {2!r}'
+                .format(
+                    load['id'],
+                    inspect_stack()['co_name'],
+                    'tok'
+                ))
+            return False
+        if not self.__verify_minion(load['id'], load['tok']):
+            # The minion is not who it says it is!
+            # We don't want to listen to it!
+            log.warn(
+                'Minion id {0} is not who it says it is!'.format(
+                    load['id']
+                )
+            )
+            return {}
+        load.pop('tok')
         if self.opts.get('minion_data_cache', False) or self.opts.get('enforce_mine_cache', False):
             cdir = os.path.join(self.opts['cachedir'], 'minions', load['id'])
             if not os.path.isdir(cdir):
@@ -976,6 +1041,25 @@ class AESFuncs(object):
             return False
         if not salt.utils.verify.valid_id(self.opts, load['id']):
             return False
+        if 'tok' not in load:
+            log.error(
+                'Received incomplete call from {0} for {1!r}, missing {2!r}'
+                .format(
+                    load['id'],
+                    inspect_stack()['co_name'],
+                    'tok'
+                ))
+            return False
+        if not self.__verify_minion(load['id'], load['tok']):
+            # The minion is not who it says it is!
+            # We don't want to listen to it!
+            log.warn(
+                'Minion id {0} is not who it says it is!'.format(
+                    load['id']
+                )
+            )
+            return {}
+        load.pop('tok')
         if self.opts.get('minion_data_cache', False) or self.opts.get('enforce_mine_cache', False):
             cdir = os.path.join(self.opts['cachedir'], 'minions', load['id'])
             if not os.path.isdir(cdir):
@@ -1001,6 +1085,25 @@ class AESFuncs(object):
             return False
         if not salt.utils.verify.valid_id(self.opts, load['id']):
             return False
+        if 'tok' not in load:
+            log.error(
+                'Received incomplete call from {0} for {1!r}, missing {2!r}'
+                .format(
+                    load['id'],
+                    inspect_stack()['co_name'],
+                    'tok'
+                ))
+            return False
+        if not self.__verify_minion(load['id'], load['tok']):
+            # The minion is not who it says it is!
+            # We don't want to listen to it!
+            log.warn(
+                'Minion id {0} is not who it says it is!'.format(
+                    load['id']
+                )
+            )
+            return {}
+        load.pop('tok')
         if self.opts.get('minion_data_cache', False) or self.opts.get('enforce_mine_cache', False):
             cdir = os.path.join(self.opts['cachedir'], 'minions', load['id'])
             if not os.path.isdir(cdir):
@@ -1027,6 +1130,25 @@ class AESFuncs(object):
             return False
         if not salt.utils.verify.valid_id(self.opts, load['id']):
             return False
+        if 'tok' not in load:
+            log.error(
+                'Received incomplete call from {0} for {1!r}, missing {2!r}'
+                .format(
+                    load['id'],
+                    inspect_stack()['co_name'],
+                    'tok'
+                ))
+            return False
+        if not self.__verify_minion(load['id'], load['tok']):
+            # The minion is not who it says it is!
+            # We don't want to listen to it!
+            log.warn(
+                'Minion id {0} is not who it says it is!'.format(
+                    load['id']
+                )
+            )
+            return {}
+        load.pop('tok')
         cpath = os.path.join(
                 self.opts['cachedir'],
                 'minions',
@@ -1053,7 +1175,7 @@ class AESFuncs(object):
         '''
         Return the pillar data for the minion
         '''
-        if any(key not in load for key in ('id', 'grains', 'env')):
+        if any(key not in load for key in ('id', 'grains', 'saltenv')):
             return False
         if not salt.utils.verify.valid_id(self.opts, load['id']):
             return False
@@ -1061,7 +1183,7 @@ class AESFuncs(object):
                 self.opts,
                 load['grains'],
                 load['id'],
-                load['env'],
+                load['saltenv'],
                 load.get('ext'))
         data = pillar.compile_pillar()
         if self.opts.get('minion_data_cache', False):
@@ -1077,19 +1199,6 @@ class AESFuncs(object):
                             )
         return data
 
-    def _master_state(self, load):
-        '''
-        Call the master to compile a master side highstate
-        '''
-        if 'opts' not in load or 'grains' not in load:
-            return False
-        return salt.state.master_compile(
-                self.opts,
-                load['opts'],
-                load['grains'],
-                load['opts']['id'],
-                load['opts']['environment'])
-
     def _minion_event(self, load):
         '''
         Receive an event from the minion and fire it on the master event
@@ -1099,6 +1208,25 @@ class AESFuncs(object):
             return False
         if not salt.utils.verify.valid_id(self.opts, load['id']):
             return False
+        if 'tok' not in load:
+            log.error(
+                'Received incomplete call from {0} for {1!r}, missing {2!r}'
+                .format(
+                    load['id'],
+                    inspect_stack()['co_name'],
+                    'tok'
+                ))
+            return False
+        if not self.__verify_minion(load['id'], load['tok']):
+            # The minion is not who it says it is!
+            # We don't want to listen to it!
+            log.warn(
+                'Minion id {0} is not who it says it is!'.format(
+                    load['id']
+                )
+            )
+            return {}
+        load.pop('tok')
         if 'events' not in load and ('tag' not in load or 'data' not in load):
             return False
         if 'events' in load:
@@ -1245,6 +1373,7 @@ class AESFuncs(object):
                 )
             )
             return {}
+        clear_load.pop('tok')
         perms = set()
         for match in self.opts['peer_run']:
             if re.match(match, clear_load['id']):
@@ -1283,6 +1412,7 @@ class AESFuncs(object):
                 )
             )
             return {}
+        load.pop('tok')
         # Check that this minion can access this data
         auth_cache = os.path.join(
                 self.opts['cachedir'],
@@ -1492,7 +1622,9 @@ class AESFuncs(object):
 
             pret = {}
             pret['key'] = pub.public_encrypt(key, 4)
-            pret['pillar'] = pcrypt.dumps(ret)
+            pret['pillar'] = pcrypt.dumps(
+                ret if ret is not False else {}
+            )
             return pret
         # AES Encrypt the return
         return self.crypticle.dumps(ret)
@@ -1809,8 +1941,10 @@ class ClearFuncs(object):
                     'load': {'ret': False}}
 
         log.info('Authentication accepted from {id}'.format(**load))
-        # only write to disk if you are adding the file
-        if not os.path.isfile(pubfn):
+        # only write to disk if you are adding the file, and in open mode,
+        # which implies we accept any key from a minion (key needs to be
+        # written every time because what's on disk is used for encrypting)
+        if not os.path.isfile(pubfn) or self.opts['open_mode']:
             with salt.utils.fopen(pubfn, 'w+') as fp_:
                 fp_.write(load['pub'])
         pub = None
@@ -1864,16 +1998,6 @@ class ClearFuncs(object):
                  'pub': load['pub']}
         self.event.fire_event(eload, tagify(prefix='auth'))
         return ret
-
-    def cloud(self, clear_load):
-        '''
-        Hook into the salt-cloud libs and execute cloud routines
-        # NOT HOOKED IN YET
-        '''
-        authorize = salt.auth.Authorize(self.opts, clear_load, self.loadauth)
-        if not authorize.rights('cloud', clear_load):
-            return False
-        return True
 
     def runner(self, clear_load):
         '''
@@ -2015,20 +2139,20 @@ class ClearFuncs(object):
             try:
                 self.event.fire_event(data, tagify([jid, 'new'], 'wheel'))
                 ret = self.wheel_.call_func(fun, **clear_load.get('kwarg', {}))
-                data['ret'] = ret
+                data['return'] = ret
                 data['success'] = True
                 self.event.fire_event(data, tagify([jid, 'ret'], 'wheel'))
-                return tag
+                return {'tag': tag}
             except Exception as exc:
                 log.error(exc)
                 log.error('Exception occurred while '
                         'introspecting {0}: {1}'.format(fun, exc))
-                data['ret'] = 'Exception occured in wheel {0}: {1}'.format(
+                data['return'] = 'Exception occured in wheel {0}: {1}'.format(
                                             fun,
                                             exc,
                                             )
                 self.event.fire_event(data, tagify([jid, 'ret'], 'wheel'))
-                return tag
+                return {'tag': tag}
 
         if 'eauth' not in clear_load:
             msg = ('Authentication failure of type "eauth" occurred for '
@@ -2076,19 +2200,19 @@ class ClearFuncs(object):
             try:
                 self.event.fire_event(data, tagify([jid, 'new'], 'wheel'))
                 ret = self.wheel_.call_func(fun, **clear_load.get('kwarg', {}))
-                data['ret'] = ret
+                data['return'] = ret
                 data['success'] = True
                 self.event.fire_event(data, tagify([jid, 'ret'], 'wheel'))
-                return tag
+                return {'tag': tag}
             except Exception as exc:
                 log.error('Exception occurred while '
                         'introspecting {0}: {1}'.format(fun, exc))
-                data['ret'] = 'Exception occured in wheel {0}: {1}'.format(
+                data['return'] = 'Exception occured in wheel {0}: {1}'.format(
                                                             fun,
                                                             exc,
                                                             )
                 self.event.fire_event(data, tagify([jid, 'ret'], 'wheel'))
-                return tag
+                return {'tag': tag}
 
         except Exception as exc:
             log.error(

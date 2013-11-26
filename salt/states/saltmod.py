@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 '''
+Control the Salt command interface
+==================================
+
 The Salt state is used to control the salt command interface. This state is
 intended for use primarily from the state runner from the master.
 
@@ -12,7 +15,7 @@ The salt.state declaration can call out a highstate or a list of sls:
           - apache
           - django
           - core
-        - env: prod
+        - saltenv: prod
 
     databasees:
       salt.state:
@@ -29,12 +32,15 @@ import salt.utils
 
 log = logging.getLogger(__name__)
 
+# Define the module's virtual name
+__virtualname__ = 'salt'
+
 
 def __virtual__():
     '''
     Named salt
     '''
-    return 'salt'
+    return __virtualname__
 
 
 def state(
@@ -74,8 +80,8 @@ def state(
         A group of sls files to execute. This can be defined as a single string
         containing a single sls file, or a list of sls files
 
-    env
-        The default environment to pull sls files from
+    saltenv
+        The default salt environment to pull sls files from
 
     ssh
         Set to `True` to use the ssh client instaed of the standard salt client
@@ -90,6 +96,17 @@ def state(
            'changes': {},
            'comment': '',
            'result': True}
+    if env is not None:
+        msg = (
+            'Passing a salt environment should be done using \'saltenv\' not '
+            '\'env\'. This warning will go away in Salt Boron and this '
+            'will be the default and expected behaviour. Please update your '
+            'state files.'
+        )
+        salt.utils.warn_until('Boron', msg)
+        ret.setdefault('warnings', []).append(msg)
+        # No need to set __env__ = env since that's done in the state machinery
+
     cmd_kw = {'arg': []}
     if 'expr_form' in kwargs and not tgt_type:
         tgt_type = kwargs['expr_form']
@@ -110,8 +127,8 @@ def state(
         return ret
     if test:
         cmd_kw['arg'].append('test={0}'.format(test))
-    if env:
-        cmd_kw['arg'].append('env={0}'.format(env))
+    if __env__ != 'base':
+        cmd_kw['arg'].append('saltenv={0}'.format(__env__))
     if ret:
         cmd_kw['ret'] = ret
     if __opts__['test'] is True:

@@ -8,6 +8,7 @@ import socket
 import subprocess
 import re
 import logging
+import os
 from string import ascii_letters, digits
 
 # Attempt to import wmi
@@ -86,10 +87,17 @@ def ip_to_host(ip):
 # pylint: enable=C0103
 
 
-def _cidr_to_ipv4_netmask(cidr_bits):
+def cidr_to_ipv4_netmask(cidr_bits):
     '''
     Returns an IPv4 netmask
     '''
+    try:
+        cidr_bits = int(cidr_bits)
+        if not 1 <= cidr_bits <= 32:
+            return ''
+    except ValueError:
+        return ''
+
     netmask = ''
     for idx in range(4):
         if idx:
@@ -109,7 +117,7 @@ def _number_of_set_bits_to_ipv4_netmask(set_bits):  # pylint: disable=C0103
 
     Ex. 0xffffff00 -> '255.255.255.0'
     '''
-    return _cidr_to_ipv4_netmask(_number_of_set_bits(set_bits))
+    return cidr_to_ipv4_netmask(_number_of_set_bits(set_bits))
 
 
 # pylint: disable=C0103
@@ -148,7 +156,7 @@ def _interfaces_ip(out):
             cidr = 32
 
         if type_ == 'inet':
-            mask = _cidr_to_ipv4_netmask(int(cidr))
+            mask = cidr_to_ipv4_netmask(int(cidr))
             if 'brd' in cols:
                 brd = cols[cols.index('brd') + 1]
         elif type_ == 'inet6':
@@ -416,7 +424,7 @@ def interfaces():
         return linux_interfaces()
 
 
-def _get_net_start(ipaddr, netmask):
+def get_net_start(ipaddr, netmask):
     ipaddr_octets = ipaddr.split('.')
     netmask_octets = netmask.split('.')
     net_start_octets = [str(int(ipaddr_octets[x]) & int(netmask_octets[x]))
@@ -424,16 +432,16 @@ def _get_net_start(ipaddr, netmask):
     return '.'.join(net_start_octets)
 
 
-def _get_net_size(mask):
+def get_net_size(mask):
     binary_str = ''
     for octet in mask.split('.'):
         binary_str += bin(int(octet))[2:].zfill(8)
     return len(binary_str.rstrip('0'))
 
 
-def _calculate_subnet(ipaddr, netmask):
-    return '{0}/{1}'.format(_get_net_start(ipaddr, netmask),
-                            _get_net_size(netmask))
+def calculate_subnet(ipaddr, netmask):
+    return '{0}/{1}'.format(get_net_start(ipaddr, netmask),
+                            get_net_size(netmask))
 
 
 def _ipv4_to_bits(ipaddr):
@@ -462,7 +470,7 @@ def subnets():
         for ipv4 in ipv4_info.get('inet', []):
             if ipv4['address'] == '127.0.0.1':
                 continue
-            network = _calculate_subnet(ipv4['address'], ipv4['netmask'])
+            network = calculate_subnet(ipv4['address'], ipv4['netmask'])
             subnetworks.append(network)
     return subnetworks
 
@@ -561,7 +569,7 @@ def ip_addrs6(interface=None, include_loopback=False):
     return sorted(list(ret))
 
 
-def hex2ip(hex_ip):
+def hex2ip(hex_ip, invert=False):
     '''
     Convert a hex string to an ip, if a failure occurs the original hex is
     returned
@@ -570,10 +578,65 @@ def hex2ip(hex_ip):
         hip = int(hex_ip, 16)
     except ValueError:
         return hex_ip
+    if invert:
+        return '{3}.{2}.{1}.{0}'.format(hip >> 24 & 255,
+                                        hip >> 16 & 255,
+                                        hip >> 8 & 255,
+                                        hip & 255)
     return '{0}.{1}.{2}.{3}'.format(hip >> 24 & 255,
                                     hip >> 16 & 255,
                                     hip >> 8 & 255,
                                     hip & 255)
+
+
+def active_tcp():
+    '''
+    Return a dict describing all active tcp connections as quickly as possible
+    '''
+    ret = {}
+    if os.path.isfile('/proc/net/tcp'):
+        with open('/proc/net/tcp', 'rb') as fp_:
+            for line in fp_:
+                if line.strip().startswith('sl'):
+                    continue
+                ret.update(_parse_tcp_line(line))
+        return ret
+    return ret
+
+
+def local_port_tcp(port):
+    '''
+    Return a set of remote ip addrs attached to the specified local port
+    '''
+    ret = set()
+    if os.path.isfile('/proc/net/tcp'):
+        with open('/proc/net/tcp', 'rb') as fp_:
+            for line in fp_:
+                if line.strip().startswith('sl'):
+                    continue
+                iret = _parse_tcp_line(line)
+                sl = iter(iret).next()
+                if iret[sl]['local_port'] == port:
+                    ret.add(iret[sl]['remote_addr'])
+        return ret
+    return ret
+
+
+def _parse_tcp_line(line):
+    '''
+    Parse a single line from the contents of /proc/net/tcp
+    '''
+    ret = {}
+    comps = line.strip().split()
+    sl = comps[0].rstrip(':')
+    ret[sl] = {}
+    l_addr, l_port = comps[1].split(':')
+    r_addr, r_port = comps[2].split(':')
+    ret[sl]['local_addr'] = hex2ip(l_addr, True)
+    ret[sl]['local_port'] = int(l_port, 16)
+    ret[sl]['remote_addr'] = hex2ip(r_addr, True)
+    ret[sl]['remote_port'] = int(r_port, 16)
+    return ret
 
 
 class IPv4Address(object):

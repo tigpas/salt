@@ -59,7 +59,7 @@ from salt.exceptions import SaltRenderError
 import salt.utils.templates
 
 
-def render(template, env='', sls='', tmplpath=None, **kws):
+def render(template, saltenv='base', sls='', tmplpath=None, **kws):
     '''
     Render the python module's components
 
@@ -73,11 +73,17 @@ def render(template, env='', sls='', tmplpath=None, **kws):
             template,
             True,
             __salt__=__salt__,
+            salt=__salt__,
             __grains__=__grains__,
+            grains=__grains__,
             __opts__=__opts__,
+            opts=__opts__,
             __pillar__=__pillar__,
-            __env__=env,
+            pillar=__pillar__,
+            __env__=saltenv,
+            saltenv=saltenv,
             __sls__=sls,
+            sls=sls,
             **kws)
     if not tmp_data.get('result', False):
         raise SaltRenderError(tmp_data.get('data',

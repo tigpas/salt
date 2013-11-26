@@ -17,7 +17,7 @@ import warnings
 
 # Import Salt Testing libs
 from salttesting import TestCase
-from salttesting.helpers import ensure_in_syspath
+from salttesting.helpers import ensure_in_syspath, TestsLoggingHandler
 
 ensure_in_syspath('../')
 
@@ -282,21 +282,21 @@ class ConfigTestCase(TestCase):
         )
         syndic_opts.update(salt.minion.resolve_dns(syndic_opts))
         # id & pki dir are shared & so configured on the minion side
-        self.assertEquals(syndic_opts['id'], 'minion')
-        self.assertEquals(syndic_opts['pki_dir'], '/tmp/salttest/pki')
+        self.assertEqual(syndic_opts['id'], 'minion')
+        self.assertEqual(syndic_opts['pki_dir'], '/tmp/salttest/pki')
         # the rest is configured master side
-        self.assertEquals(syndic_opts['master_uri'], 'tcp://127.0.0.1:54506')
-        self.assertEquals(syndic_opts['master_port'], 54506)
-        self.assertEquals(syndic_opts['master_ip'], '127.0.0.1')
-        self.assertEquals(syndic_opts['master'], 'localhost')
-        self.assertEquals(syndic_opts['sock_dir'], '/tmp/salttest/minion_sock')
-        self.assertEquals(syndic_opts['cachedir'], '/tmp/salttest/cachedir')
-        self.assertEquals(syndic_opts['log_file'], '/tmp/salttest/osyndic.log')
-        self.assertEquals(syndic_opts['pidfile'], '/tmp/salttest/osyndic.pid')
+        self.assertEqual(syndic_opts['master_uri'], 'tcp://127.0.0.1:54506')
+        self.assertEqual(syndic_opts['master_port'], 54506)
+        self.assertEqual(syndic_opts['master_ip'], '127.0.0.1')
+        self.assertEqual(syndic_opts['master'], 'localhost')
+        self.assertEqual(syndic_opts['sock_dir'], '/tmp/salttest/minion_sock')
+        self.assertEqual(syndic_opts['cachedir'], '/tmp/salttest/cachedir')
+        self.assertEqual(syndic_opts['log_file'], '/tmp/salttest/osyndic.log')
+        self.assertEqual(syndic_opts['pidfile'], '/tmp/salttest/osyndic.pid')
         # Show that the options of localclient that repub to local master
         # are not merged with syndic ones
-        self.assertEquals(syndic_opts['_master_conf_file'], minion_config_path)
-        self.assertEquals(syndic_opts['_minion_conf_file'], syndic_conf_path)
+        self.assertEqual(syndic_opts['_master_conf_file'], minion_config_path)
+        self.assertEqual(syndic_opts['_minion_conf_file'], syndic_conf_path)
 
     def test_check_dns_deprecation_warning(self):
         helium_version = SaltStackVersion.from_name('Helium')
@@ -356,6 +356,34 @@ class ConfigTestCase(TestCase):
                 '{0}.'.format(helium_version.formatted_version),
                 str(w[-1].message)
             )
+
+    def test_issue_6714_parsing_errors_logged(self):
+        try:
+            tempdir = tempfile.mkdtemp(dir=integration.SYS_TMP_DIR)
+            test_config = os.path.join(tempdir, 'config')
+
+            # Let's populate a master configuration file with some basic
+            # settings
+            salt.utils.fopen(test_config, 'w').write(
+                'root_dir: {0}\n'
+                'log_file: {0}/foo.log\n'.format(tempdir) +
+                '\n\n\n'
+                'blah:false\n'
+            )
+
+            with TestsLoggingHandler() as handler:
+                # Let's load the configuration
+                config = sconfig.master_config(test_config)
+                for message in handler.messages:
+                    if message.startswith('ERROR:Error parsing configuration'):
+                        break
+                else:
+                    raise AssertionError(
+                        'No parsing error message was logged'
+                    )
+        finally:
+            if os.path.isdir(tempdir):
+                shutil.rmtree(tempdir)
 
 
 if __name__ == '__main__':

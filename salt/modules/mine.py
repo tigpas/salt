@@ -64,19 +64,24 @@ def update(clear=False):
             log.error('Function {0} in mine_functions failed to execute'
                       .format(func))
             continue
+    if __opts__['file_client'] == 'local':
+        if not clear:
+            old = __salt__['data.getval']('mine_cache')
+            if isinstance(old, dict):
+                old.update(data)
+                data = old
+        return __salt__['data.update']('mine_cache', data)
+    auth = _auth()
     load = {
             'cmd': '_mine',
             'data': data,
             'id': __opts__['id'],
             'clear': clear,
+            'tok': auth.gen_token('salt'),
     }
     sreq = salt.payload.SREQ(__opts__['master_uri'])
-    auth = _auth()
-    try:
-        sreq.send('aes', auth.crypticle.dumps(load), 1, 0)
-    except Exception:
-        pass
-    return True
+    ret = sreq.send('aes', auth.crypticle.dumps(load))
+    return auth.crypticle.loads(ret)
 
 
 def send(func, *args, **kwargs):
@@ -110,18 +115,22 @@ def send(func, *args, **kwargs):
         log.error('Function {0} in mine.send failed to execute: {1}'
                   .format(func, exc))
         return False
+    if __opts__['file_client'] == 'local':
+        old = __salt__['data.getval']('mine_cache')
+        if isinstance(old, dict):
+            old.update(data)
+            data = old
+        return __salt__['data.update']('mine_cache', data)
+    auth = _auth()
     load = {
             'cmd': '_mine',
             'data': data,
             'id': __opts__['id'],
+            'tok': auth.gen_token('salt'),
     }
     sreq = salt.payload.SREQ(__opts__['master_uri'])
-    auth = _auth()
-    try:
-        sreq.send('aes', auth.crypticle.dumps(load), 1, 10)
-    except Exception:
-        return True
-    return True
+    ret = sreq.send('aes', auth.crypticle.dumps(load))
+    return auth.crypticle.loads(ret)
 
 
 def get(tgt, fun, expr_form='glob'):
@@ -146,6 +155,21 @@ def get(tgt, fun, expr_form='glob'):
     if expr_form.lower == 'pillar':
         log.error('Pillar matching not supported on mine.get')
         return ''
+    if __opts__['file_client'] == 'local':
+        ret = {}
+        is_target = {'glob': __salt__['match.glob'],
+                     'pcre': __salt__['match.pcre'],
+                     'list': __salt__['match.list'],
+                     'grain': __salt__['match.grain'],
+                     'grain_pcre': __salt__['match.grain_pcre'],
+                     'compound': __salt__['match.compound'],
+                     'ipcidr': __salt__['match.ipcidr'],
+                     }[expr_form](tgt)
+        if is_target:
+            data = __salt__['data.getval']('mine_cache')
+            if isinstance(data, dict) and fun in data:
+                ret[__opts__['id']] = data[fun]
+        return ret
     auth = _auth()
     load = {
             'cmd': '_mine_get',
@@ -153,6 +177,7 @@ def get(tgt, fun, expr_form='glob'):
             'tgt': tgt,
             'fun': fun,
             'expr_form': expr_form,
+            'tok': auth.gen_token('salt'),
     }
     sreq = salt.payload.SREQ(__opts__['master_uri'])
     ret = sreq.send('aes', auth.crypticle.dumps(load))
@@ -169,11 +194,17 @@ def delete(fun):
 
         salt '*' mine.delete 'network.interfaces'
     '''
+    if __opts__['file_client'] == 'local':
+        data = __salt__['data.getval']('mine_cache')
+        if isinstance(data, dict) and fun in data:
+            del data[fun]
+        return __salt__['data.update']('mine_cache', data)
     auth = _auth()
     load = {
             'cmd': '_mine_delete',
             'id': __opts__['id'],
-            'fun': fun
+            'fun': fun,
+            'tok': auth.gen_token('salt'),
     }
     sreq = salt.payload.SREQ(__opts__['master_uri'])
     ret = sreq.send('aes', auth.crypticle.dumps(load))
@@ -190,10 +221,13 @@ def flush():
 
         salt '*' mine.flush
     '''
+    if __opts__['file_client'] == 'local':
+        return __salt__['data.update']('mine_cache', {})
     auth = _auth()
     load = {
             'cmd': '_mine_flush',
             'id': __opts__['id'],
+            'tok': auth.gen_token('salt'),
     }
     sreq = salt.payload.SREQ(__opts__['master_uri'])
     ret = sreq.send('aes', auth.crypticle.dumps(load))

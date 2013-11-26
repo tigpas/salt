@@ -65,13 +65,13 @@ start() {
         fi
     else
         if [ $(pidofproc $PROCESS) ]; then
-	          RETVAL=$?
-	          echo -n "already running"
+            RETVAL=$?
+            echo -n "already running"
         else
-	          daemon --check $SERVICE $SALTMINION -d $MINION_ARGS
-	          RETVAL=$?
+            daemon --check $SERVICE $SALTMINION -d $MINION_ARGS 
         fi
     fi
+    RETVAL=$?
     echo
     return $RETVAL
 }

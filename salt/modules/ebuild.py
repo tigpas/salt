@@ -16,11 +16,8 @@ import re
 # Import salt libs
 import salt.utils
 
-log = logging.getLogger(__name__)
-
-HAS_PORTAGE = False
-
 # Import third party libs
+HAS_PORTAGE = False
 try:
     import portage
     HAS_PORTAGE = True
@@ -36,12 +33,19 @@ except ImportError:
         except ImportError:
             pass
 
+log = logging.getLogger(__name__)
+
+# Define the module's virtual name
+__virtualname__ = 'pkg'
+
 
 def __virtual__():
     '''
     Confirm this module is on a Gentoo based system
     '''
-    return 'pkg' if (HAS_PORTAGE and __grains__['os'] == 'Gentoo') else False
+    if HAS_PORTAGE and __grains__['os'] == 'Gentoo':
+        return __virtualname__
+    return False
 
 
 def _vartree():
@@ -80,13 +84,28 @@ def _cpv_to_version(cpv):
     return portage.versions.cpv_getversion(cpv)
 
 
-def _process_emerge_err(stderr):
+def _process_emerge_err(stdout, stderr):
     '''
     Used to parse emerge output to provide meaningful output when emerge fails
     '''
     ret = {}
     changes = {}
-    rexp = re.compile(r'([<>=][^ ]+/[^ ]+ [^\n]+)')
+    rexp = re.compile(r'^[<>=][^ ]+/[^ ]+ [^\n]+', re.M)
+
+    slot_conflicts = re.compile(r'^[^ \n]+/[^ ]+:[^ ]', re.M).findall(stderr)
+    if slot_conflicts:
+        changes['slot conflicts'] = slot_conflicts
+
+    blocked = re.compile(r'(?m)^\[blocks .+\] '
+                         r'([^ ]+/[^ ]+-[0-9]+[^ ]+)'
+                         r'.*$').findall(stdout)
+
+    unsatisfied = re.compile(
+            r'Error: The above package list contains').findall(stderr)
+
+    # If there were blocks and emerge could not resolve it.
+    if blocked and unsatisfied:
+        changes['blocked'] = blocked
 
     sections = re.split('\n\n', stderr)
     for section in sections:
@@ -98,7 +117,7 @@ def _process_emerge_err(stderr):
             changes['use'] = rexp.findall(section)
         elif 'The following mask changes' in section:
             changes['mask'] = rexp.findall(section)
-    ret['changes'] = changes
+    ret['changes'] = {'Needed changes': changes}
     return ret
 
 
@@ -547,9 +566,9 @@ def install(name=None,
     call = __salt__['cmd.run_all'](cmd)
     __context__.pop('pkg.list_pkgs', None)
     if call['retcode'] != 0:
-        return _process_emerge_err(call['stderr'])
+        return _process_emerge_err(call['stdout'], call['stderr'])
     new = list_pkgs()
-    changes.update(__salt__['pkg_resource.find_changes'](old, new))
+    changes.update(salt.utils.compare_dicts(old, new))
     return changes
 
 
@@ -592,9 +611,9 @@ def update(pkg, slot=None, fromrepo=None, refresh=False):
     call = __salt__['cmd.run_all'](cmd)
     __context__.pop('pkg.list_pkgs', None)
     if call['retcode'] != 0:
-        return _process_emerge_err(call['stderr'])
+        return _process_emerge_err(call['stdout'], call['stderr'])
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def upgrade(refresh=True):
@@ -620,9 +639,9 @@ def upgrade(refresh=True):
     call = __salt__['cmd.run_all'](cmd)
     __context__.pop('pkg.list_pkgs', None)
     if call['retcode'] != 0:
-        return _process_emerge_err(call['stderr'])
+        return _process_emerge_err(call['stdout'], call['stderr'])
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def remove(name=None, slot=None, fromrepo=None, pkgs=None, **kwargs):
@@ -677,7 +696,7 @@ def remove(name=None, slot=None, fromrepo=None, pkgs=None, **kwargs):
     __salt__['cmd.run_all'](cmd)
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def purge(name=None, slot=None, fromrepo=None, pkgs=None, **kwargs):
@@ -763,7 +782,7 @@ def depclean(name=None, slot=None, fromrepo=None, pkgs=None):
     __salt__['cmd.run_all'](cmd)
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def version_cmp(pkg1, pkg2):

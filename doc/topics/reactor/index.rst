@@ -31,26 +31,33 @@ information about the event.
 Mapping Events to Reactor SLS Files
 ===================================
 
-The event tag and data are both critical when working with the reactor system.
-In the master configuration file under the reactor option, tags are associated
-with lists of reactor sls formulas (globs can be used for matching):
+Reactor SLS files and event tags are associated in the master config file.
+By default this is /etc/salt/master, or /etc/salt/master.d/reactor.conf.
+
+In the master config section 'reactor:' is a list of event tags to be matched
+and each event tag has a list of reactor SLS files to be run.
 
 .. code-block:: yaml
 
-    reactor:
-      - 'auth':
-        - /srv/reactor/authreact1.sls
-        - /srv/reactor/authreact2.sls
-      - 'minion_start':
-        - /srv/reactor/start.sls
+    reactor:                           # Master config section "reactor"
+     
+      - 'minion_start':                # Match tag "minion_start"
+        - /srv/reactor/start.sls       # Things to do when a minion starts
+        - /srv/reactor/monitor.sls     # Other things to do
 
-When an event with a tag of ``auth`` is fired, the reactor will catch the event 
-and render the two listed files. The rendered files are standard sls files, so 
-by default they are yaml + Jinja. The Jinja is packed with a few data 
-structures similar to state and pillar sls files. The data available is in 
-``tag`` and ``data`` variables. The ``tag`` variable is just the tag in the 
-fired event and the ``data`` variable is the event's data dict. Here is a
-simple reactor sls:
+      - 'salt/cloud/*/destroyed':     # Globs can be used to matching tags
+        - /srv/reactor/decommision.sls # Things to do when a server is removed
+
+
+Reactor sls files are similar to state and pillar sls files.  They are
+by default yaml + Jinja templates and are passed familar context variables.
+
+They differ because of the addtion of the ``tag`` and ``data`` variables.
+
+- The ``tag`` variable is just the tag in the fired event.
+- The ``data`` variable is the event's data dict.
+
+Here is a simple reactor sls:
 
 .. code-block:: yaml
 
@@ -82,23 +89,23 @@ execution.
 Fire an event
 =============
 
-From a minion, run bellow command
+To fire an event from a minion call ``event.fire_master``
 
 .. code-block:: bash
 
     salt-call event.fire_master '{"overstate": "refresh"}' 'foo'
 
-In reactor fomular files that are associated with tag ``foo``, data can be
-accessed via ``data['data']``. Above command passed a dictionary as data, its
-``overstate`` key can be accessed via ``data['data']['overstate']``. See
-:py:mod:`salt.modules.event` for more information.
+After this is called, any reactor sls files matching event tag ``foo`` will 
+execute with ``{{ data['data']['overstate'] }}`` equal to ``'refresh'``.
+
+See :py:mod:`salt.modules.event` for more information.
 
 Understanding the Structure of Reactor Formulas
 ===============================================
 
 While the reactor system uses the same data structure as the state system, this
-data does not translate the same way to operations. In state, formulas
-information is mapped to the state functions, but in the reactor system,
+data does not translate the same way to operations. In state files formula
+information is mapped to the state functions, but in the reactor system
 information is mapped to a number of available subsystems on the master. These
 systems are the :strong:`LocalClient` and the :strong:`Runners`. The
 :strong:`state declaration` field takes a reference to the function to call in
@@ -163,3 +170,68 @@ Use the ``expr_form`` argument to specify a matcher:
         - expr_form: compound
         - arg:
           - rm -rf /tmp/*
+
+An interesting trick to pass data from the Reactor script to
+``state.highstate`` or ``state.sls`` is to pass it as inline Pillar data since
+both functions take a keyword argument named ``pillar``.
+
+The following example uses Salt's Reactor to listen for the event that is fired
+when the key for a new minion is accepted on the master using ``salt-key``.
+
+:file:`/etc/salt/master.d/reactor.conf`:
+
+.. code-block:: yaml
+
+    reactor:
+      - 'salt/key':
+        - /srv/salt/haproxy/react_new_minion.sls
+
+The Reactor then fires a ``state.sls`` command targeted to the HAProxy servers
+and passes the ID of the new minion from the event to the state file via inline
+Pillar.
+
+Note, the Pillar data will need to be passed as a string since that is how it
+is passed at the CLI. That string will be parsed as YAML on the minion (same as
+how it works at the CLI).
+
+:file:`/srv/salt/haproxy/react_new_minion.sls`:
+
+.. code-block:: yaml
+
+    {% if data['act'] == 'accept' and data['id'].startswith('web') %}
+    add_new_minion_to_pool:
+      cmd.state.sls:
+        - tgt: 'haproxy*'
+        - arg:
+          - haproxy.refresh_pool
+          - 'pillar={new_minion: {{ data['id'] }}}'
+    {% endif %}
+
+The above command is equivalent to the following command at the CLI:
+
+.. code-block:: bash
+
+    salt 'haproxy*' state.sls haproxy.refresh_pool 'pillar={new_minion: minionid}'
+
+Finally that data is availabe in the state file using the normal Pillar lookup
+syntax. The following example is grabbing web server names and IP addresses
+from :ref:`Salt Mine <salt-mine>`. If this state is invoked from the Reactor
+then the custom Pillar value from above will be available and the new minion
+will be added to the pool but with the ``disabled`` flag so that HAProxy won't
+yet direct traffic to it.
+
+:file:`/srv/salt/haproxy/refresh_pool.sls`:
+
+.. code-block:: yaml
+
+    {% set new_minion = salt['pillar.get']('new_minion') %}
+
+    listen web *:80
+        balance source
+        {% for server,ip in salt['mine.get']('web*', 'network.interfaces', ['eth0']).items() %}
+        {% if server == new_minion %}
+        server {{ server }} {{ ip }}:80 disabled
+        {% else %}
+        server {{ server }} {{ ip }}:80 check
+        {% endif %}
+        {% endfor %}

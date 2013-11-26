@@ -11,6 +11,7 @@ import shutil
 import time
 import logging
 import tarfile
+import datetime
 import tempfile
 
 # Import salt libs
@@ -63,7 +64,11 @@ def _check_pillar(kwargs):
 
 
 def _wait(jid):
-    """ Wait for all previously started state jobs to finish running """
+    '''
+    Wait for all previously started state jobs to finish running
+    '''
+    if jid is None:
+        jid = '{0:%Y%m%d%H%M%S%f}'.format(datetime.datetime.now())
     states = _prior_running_states(jid)
     while states:
         time.sleep(1)
@@ -99,10 +104,10 @@ def running():
 
 
 def _prior_running_states(jid):
-    """
+    '''
     Return a list of dicts of prior calls to state functions.  This function is
     used to queue state calls so only one is run at a time.
-    """
+    '''
 
     ret = []
     active = __salt__['saltutil.is_running']('state.*')
@@ -124,7 +129,7 @@ def low(data, queue=False, **kwargs):
         salt '*' state.low '{"state": "pkg", "fun": "installed", "name": "vi"}'
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -155,7 +160,7 @@ def high(data, queue=False, **kwargs):
         salt '*' state.high '{"vim": {"pkg": ["installed"]}}'
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -178,7 +183,7 @@ def template(tem, queue=False, **kwargs):
         salt '*' state.template '<Path to template on the minion>'
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -201,7 +206,7 @@ def template_str(tem, queue=False, **kwargs):
         salt '*' state.template_str '<Template String>'
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -227,13 +232,14 @@ def highstate(test=None, queue=False, **kwargs):
         salt '*' state.highstate exclude="[{'id': 'id_to_exclude'}, {'sls': 'sls_to_exclude'}]"
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
             __context__['retcode'] = 1
             return conflict
-    opts = copy.copy(__opts__)
+    orig_test = __opts__.get('test', None)
+    opts = copy.deepcopy(__opts__)
 
     if salt.utils.test_mode(test=test, **kwargs):
         opts['test'] = True
@@ -241,7 +247,14 @@ def highstate(test=None, queue=False, **kwargs):
         opts['test'] = __opts__.get('test', None)
 
     if 'env' in kwargs:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
         opts['environment'] = kwargs['env']
+    elif 'saltenv' in kwargs:
+        opts['environment'] = kwargs['saltenv']
 
     pillar = kwargs.get('pillar')
 
@@ -277,13 +290,23 @@ def highstate(test=None, queue=False, **kwargs):
         log.error(msg.format(cache_file))
     os.umask(cumask)
     _set_retcode(ret)
+    # Work around Windows multiprocessing bug, set __opts__['test'] back to
+    # value from before this function was run.
+    __opts__['test'] = orig_test
     return ret
 
 
-def sls(mods, env='base', test=None, exclude=None, queue=False, **kwargs):
+def sls(mods,
+        saltenv='base',
+        test=None,
+        exclude=None,
+        queue=False,
+        env=None,
+        **kwargs):
     '''
-    Execute a set list of state modules from an environment, default
-    environment is base
+    Execute a set list of state modules from an environment. The default
+    environment is ``base``, use ``saltenv`` (``env`` in Salt 0.17.x and older)
+    to specify a different environment
 
     CLI Example:
 
@@ -292,9 +315,17 @@ def sls(mods, env='base', test=None, exclude=None, queue=False, **kwargs):
         salt '*' state.sls core,edit.vim dev
         salt '*' state.sls core exclude="[{'id': 'id_to_exclude'}, {'sls': 'sls_to_exclude'}]"
     '''
+    if env is not None:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        # Backwards compatibility
+        saltenv = env
 
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -305,10 +336,13 @@ def sls(mods, env='base', test=None, exclude=None, queue=False, **kwargs):
         err = ['Pillar failed to render with the following messages:']
         err += __pillar__['_errors']
         return err
-    opts = copy.copy(__opts__)
+    orig_test = __opts__.get('test', None)
+    opts = copy.deepcopy(__opts__)
 
     if salt.utils.test_mode(test=test, **kwargs):
         opts['test'] = True
+    elif test is not None:
+        opts['test'] = test
     else:
         opts['test'] = __opts__.get('test', None)
 
@@ -333,7 +367,7 @@ def sls(mods, env='base', test=None, exclude=None, queue=False, **kwargs):
 
     st_.push_active()
     try:
-        high_, errors = st_.render_highstate({env: mods})
+        high_, errors = st_.render_highstate({saltenv: mods})
 
         if errors:
             __context__['retcode'] = 1
@@ -364,6 +398,9 @@ def sls(mods, env='base', test=None, exclude=None, queue=False, **kwargs):
         log.error(msg.format(cache_file))
     os.umask(cumask)
     _set_retcode(ret)
+    # Work around Windows multiprocessing bug, set __opts__['test'] back to
+    # value from before this function was run.
+    __opts__['test'] = orig_test
     with salt.utils.fopen(cfn, 'w+') as fp_:
         try:
             serial.dump(high_, fp_)
@@ -386,7 +423,7 @@ def top(topfn, test=None, queue=False, **kwargs):
         salt '*' state.top reverse_top.sls exclude="[{'id': 'id_to_exclude'}, {'sls': 'sls_to_exclude'}]"
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -397,11 +434,13 @@ def top(topfn, test=None, queue=False, **kwargs):
         err = ['Pillar failed to render with the following messages:']
         err += __pillar__['_errors']
         return err
+    orig_test = __opts__.get('test', None)
+    opts = copy.deepcopy(__opts__)
     if salt.utils.test_mode(test=test, **kwargs):
-        __opts__['test'] = True
+        opts['test'] = True
     else:
-        __opts__['test'] = __opts__.get('test', None)
-    st_ = salt.state.HighState(__opts__)
+        opts['test'] = __opts__.get('test', None)
+    st_ = salt.state.HighState(opts)
     st_.push_active()
     st_.opts['state_top'] = os.path.join('salt://', topfn)
     try:
@@ -413,6 +452,9 @@ def top(topfn, test=None, queue=False, **kwargs):
     finally:
         st_.pop_active()
     _set_retcode(ret)
+    # Work around Windows multiprocessing bug, set __opts__['test'] back to
+    # value from before this function was run.
+    __opts__['test'] = orig_test
     return ret
 
 
@@ -427,7 +469,7 @@ def show_highstate(queue=False, **kwargs):
         salt '*' state.show_highstate
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -455,7 +497,7 @@ def show_lowstate(queue=False, **kwargs):
         salt '*' state.show_lowstate
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -470,25 +512,41 @@ def show_lowstate(queue=False, **kwargs):
     return ret
 
 
-def show_sls(mods, env='base', test=None, queue=False, **kwargs):
+def show_low_sls(mods,
+                 saltenv='base',
+                 test=None,
+                 queue=False,
+                 env=None,
+                 **kwargs):
     '''
-    Display the state data from a specific sls or list of sls files on the
-    master
+    Display the low data from a specific sls. The default environment is
+    ``base``, use ``saltenv`` (``env`` in Salt 0.17.x and older) to specify a
+    different environment.
 
     CLI Example:
 
     .. code-block:: bash
 
-        salt '*' state.show_sls core,edit.vim dev
+        salt '*' state.show_low_sls foo
     '''
+    if env is not None:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        # Backwards compatibility
+        saltenv = env
+
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
             __context__['retcode'] = 1
             return conflict
-    opts = copy.copy(__opts__)
+    orig_test = __opts__.get('test', None)
+    opts = copy.deepcopy(__opts__)
     if salt.utils.test_mode(test=test, **kwargs):
         opts['test'] = True
     else:
@@ -498,10 +556,65 @@ def show_sls(mods, env='base', test=None, queue=False, **kwargs):
         mods = mods.split(',')
     st_.push_active()
     try:
-        high_, errors = st_.render_highstate({env: mods})
+        high_, errors = st_.render_highstate({saltenv: mods})
     finally:
         st_.pop_active()
     errors += st_.state.verify_high(high_)
+    if errors:
+        __context__['retcode'] = 1
+        return errors
+    ret = st_.state.compile_high_data(high_)
+    # Work around Windows multiprocessing bug, set __opts__['test'] back to
+    # value from before this function was run.
+    __opts__['test'] = orig_test
+    return ret
+
+
+def show_sls(mods, saltenv='base', test=None, queue=False, env=None, **kwargs):
+    '''
+    Display the state data from a specific sls or list of sls files on the
+    master. The default environment is ``base``, use ``saltenv`` (``env`` in
+    Salt 0.17.x and older) to specify a different environment.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' state.show_sls core,edit.vim dev
+    '''
+    if env is not None:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        # Backwards compatibility
+        saltenv = env
+    if queue:
+        _wait(kwargs.get('__pub_jid'))
+    else:
+        conflict = running()
+        if conflict:
+            __context__['retcode'] = 1
+            return conflict
+    orig_test = __opts__.get('test', None)
+    opts = copy.deepcopy(__opts__)
+    if salt.utils.test_mode(test=test, **kwargs):
+        opts['test'] = True
+    else:
+        opts['test'] = __opts__.get('test', None)
+    st_ = salt.state.HighState(opts)
+    if isinstance(mods, string_types):
+        mods = mods.split(',')
+    st_.push_active()
+    try:
+        high_, errors = st_.render_highstate({saltenv: mods})
+    finally:
+        st_.pop_active()
+    errors += st_.state.verify_high(high_)
+    # Work around Windows multiprocessing bug, set __opts__['test'] back to
+    # value from before this function was run.
+    __opts__['test'] = orig_test
     if errors:
         __context__['retcode'] = 1
         return errors
@@ -519,7 +632,7 @@ def show_top(queue=False, **kwargs):
         salt '*' state.show_top
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -534,20 +647,6 @@ def show_top(queue=False, **kwargs):
         return errors
     matches = st_.top_matches(top_)
     return matches
-
-# Just commenting out, someday I will get this working
-#def show_masterstate():
-#    '''
-#    Display the data gathered from the master compiled state
-#
-#    CLI Example:
-#
-#    .. code-block:: bash
-#
-#        salt '*' state.show_masterstate
-#    '''
-#    st_ = salt.state.RemoteHighState(__opts__, __grains__)
-#    return st_.compile_master()
 
 
 def single(fun, name, test=None, queue=False, **kwargs):
@@ -568,7 +667,7 @@ def single(fun, name, test=None, queue=False, **kwargs):
 
     '''
     if queue:
-        _wait(kwargs['__pub_jid'])
+        _wait(kwargs.get('__pub_jid'))
     else:
         conflict = running()
         if conflict:
@@ -582,7 +681,8 @@ def single(fun, name, test=None, queue=False, **kwargs):
                    'fun': comps[1],
                    '__id__': name,
                    'name': name})
-    opts = copy.copy(__opts__)
+    orig_test = __opts__.get('test', None)
+    opts = copy.deepcopy(__opts__)
     if salt.utils.test_mode(test=test, **kwargs):
         opts['test'] = True
     else:
@@ -596,6 +696,9 @@ def single(fun, name, test=None, queue=False, **kwargs):
     ret = {'{0[state]}_|-{0[__id__]}_|-{0[name]}_|-{0[fun]}'.format(kwargs):
             st_.call(kwargs)}
     _set_retcode(ret)
+    # Work around Windows multiprocessing bug, set __opts__['test'] back to
+    # value from before this function was run.
+    __opts__['test'] = orig_test
     return ret
 
 
@@ -624,7 +727,7 @@ def clear_cache():
     return ret
 
 
-def pkg(pkg_path, test=False, **kwargs):
+def pkg(pkg_path, pkg_sum, hash_type, test=False, **kwargs):
     '''
     Execute a packaged state run, the packaged state run will exist in a
     tarball available locally. This packaged state
@@ -638,6 +741,8 @@ def pkg(pkg_path, test=False, **kwargs):
     '''
     # TODO - Add ability to download from salt master or other source
     if not os.path.isfile(pkg_path):
+        return {}
+    if not salt.utils.get_hash(pkg_path, hash_type) == pkg_sum:
         return {}
     root = tempfile.mkdtemp()
     s_pkg = tarfile.open(pkg_path, 'r:gz')

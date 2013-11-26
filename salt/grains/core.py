@@ -143,6 +143,13 @@ def _linux_gpu_data():
         )
         return {}
 
+    elif __opts__.get('enable_gpu_grains', None) is False:
+        log.info(
+            'Skipping lspci call because enable_gpu_grains was set to False '
+            'in the config. GPU grains will not be available.'
+        )
+        return {}
+
     # dominant gpu vendors to search for (MUST be lowercase for matching below)
     known_vendors = ['nvidia', 'amd', 'ati', 'intel']
 
@@ -152,7 +159,11 @@ def _linux_gpu_data():
 
         cur_dev = {}
         error = False
-        for line in lspci_out.splitlines():
+        # Add a blank element to the lspci_out.splitlines() list,
+        # otherwise the last device is not evaluated as a cur_dev and ignored.
+        lspci_list = lspci_out.splitlines()
+        lspci_list.append('')
+        for line in lspci_list:
             # check for record-separating empty lines
             if line == '':
                 if cur_dev.get('Class', '') == 'VGA compatible controller':
@@ -525,7 +536,7 @@ def _virtual(osdata):
                 # Tested on Fedora 10 / 2.6.27.30-170.2.82 with xen
                 # Tested on Fedora 15 / 2.6.41.4-1 without running xen
                 elif isdir('/sys/bus/xen'):
-                    if 'xen' in __salt__['cmd.run']('dmesg').lower():
+                    if 'xen:' in __salt__['cmd.run']('dmesg').lower():
                         grains['virtual_subtype'] = 'Xen PV DomU'
                     elif os.listdir('/sys/bus/xen/drivers'):
                         # An actual DomU will have several drivers
@@ -600,6 +611,8 @@ def _ps(osdata):
         grains['ps'] = 'tasklist.exe'
     elif osdata.get('virtual', '') == 'openvzhn':
         grains['ps'] = 'ps -fH -p $(grep -l \"^envID:[[:space:]]*0\\$\" /proc/[0-9]*/status | sed -e \"s=/proc/\\([0-9]*\\)/.*=\\1=\")  | awk \'{ $7=\"\"; print }\''
+    elif osdata['os_family'] == 'Debian':
+        grains['ps'] = 'ps -efHww'
     else:
         grains['ps'] = 'ps -efH'
     return grains
@@ -746,7 +759,7 @@ def os_data():
     grains = {
         'num_gpus': 0,
         'gpus': [],
-    }
+        }
 
     # Windows Server 2008 64-bit
     # ('Windows', 'MINIONNAME', '2008ServerR2', '6.1.7601', 'AMD64', 'Intel64 Fam ily 6 Model 23 Stepping 6, GenuineIntel')
@@ -812,6 +825,15 @@ def os_data():
                             name, value = match.groups()
                             if name.lower() == 'name':
                                 grains['lsb_distrib_id'] = value.strip()
+            elif os.path.isfile('/etc/SuSE-release'):
+                grains['lsb_distrib_id'] = 'SUSE'
+                rel = open('/etc/SuSE-release').read().split('\n')[1]
+                patch = open('/etc/SuSE-release').read().split('\n')[2]
+                rel = re.sub("[^0-9]", "", rel)
+                patch = re.sub("[^0-9]", "", patch)
+                release = rel + " SP" + patch
+                grains['lsb_distrib_release'] = release
+                grains['lsb_distrib_codename'] = "n.a"
             elif os.path.isfile('/etc/altlinux-release'):
                 # ALT Linux
                 grains['lsb_distrib_id'] = 'altlinux'
@@ -938,12 +960,12 @@ def os_data():
         grains['osmajorrelease'] = grains['osrelease'].split('.', 1)
 
         grains['osfinger'] = '{os}-{ver}'.format(
-                os=grains['osfullname'],
-                ver=grains['osrelease'].partition('.')[0])
+            os=grains['osfullname'],
+            ver=grains['osrelease'].partition('.')[0])
     elif grains.get('osfullname') == 'Ubuntu':
         grains['osfinger'] = '{os}-{ver}'.format(
-                os=grains['osfullname'],
-                ver=grains['osrelease'])
+            os=grains['osfullname'],
+            ver=grains['osrelease'])
 
     return grains
 

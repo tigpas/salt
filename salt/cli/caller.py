@@ -61,13 +61,13 @@ class Caller(object):
             sys.stderr.write('Function {0} is not available\n'.format(fun))
             sys.exit(-1)
         try:
-            args, kwargs = salt.minion.parse_args_and_kwargs(
-                self.minion.functions[fun], self.opts['arg'])
             sdata = {
                     'fun': fun,
                     'pid': os.getpid(),
                     'jid': ret['jid'],
                     'tgt': 'salt-call'}
+            args, kwargs = salt.minion.parse_args_and_kwargs(
+                self.minion.functions[fun], self.opts['arg'], data=sdata)
             try:
                 with salt.utils.fopen(proc_fn, 'w+') as fp_:
                     fp_.write(self.serial.dumps(sdata))
@@ -104,6 +104,7 @@ class Caller(object):
             ret['fun_args'] = self.opts['arg']
             for returner in self.opts['return'].split(','):
                 try:
+                    ret['success'] = True
                     self.minion.returners['{0}.returner'.format(returner)](ret)
                 except Exception:
                     pass

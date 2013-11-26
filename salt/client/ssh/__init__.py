@@ -14,12 +14,15 @@ import time
 import multiprocessing
 import re
 import logging
+import yaml
 
 # Import salt libs
 import salt.client.ssh.shell
 import salt.client.ssh.wrapper
 import salt.utils
 import salt.utils.thin
+import salt.utils.verify
+import salt.utils.event
 import salt.roster
 import salt.state
 import salt.loader
@@ -31,8 +34,8 @@ import salt.exceptions
 RSTR = '_edbc7885e4f9aac9b83b35999b68d015148caf467b78fa39c05f669c0ff89878'
 
 
-# This shim facilitaites remote salt-call operations
-# - Explicitly invokes bourne shell for univeral compatibility
+# This shim facilitates remote salt-call operations
+# - Explicitly invokes Bourne shell for universal compatibility
 #
 # 1. Identify a suitable python
 # 2. Test for remote salt-call and version if present
@@ -59,11 +62,34 @@ SSH_SHIM = '''/bin/sh << 'EOF'
          fi
       done
       SALT=/tmp/.salt/salt-call
+      if [ {{2}} = 'md5' ]
+      then
+         for md5_candidate in \\
+            md5sum            \\
+            md5               ;
+         do
+            if [ $(which $md5_candidate 2>/dev/null) ]
+            then
+                SUMCHECK=$(which $md5_candidate)
+                break
+            fi
+         done
+      else
+         SUMCHECK={{2}}
+      fi
+
+      if [ $SUMCHECK = '/sbin/md5' ]
+      then
+         CUT_MARK=4
+      else
+         CUT_MARK=1
+      fi
+
       if [ -f $SALT ]
       then
          if [ $(cat /tmp/.salt/version) != {0} ]
          then
-            {{0}} rm -rf /tmp/.salt && {{0}} install -m 1777 -d /tmp/.salt
+            {{0}} rm -rf /tmp/.salt && install -m 0700 -d /tmp/.salt
             if [ $? -ne 0 ]; then
                 exit 1
             fi
@@ -78,14 +104,20 @@ SSH_SHIM = '''/bin/sh << 'EOF'
             echo "Python too old" >&2
             exit 1
          fi
-         echo "{1}"
-         {{0}} install -m 1777 -d /tmp/.salt
-         echo "deploy"
-         exit 1
+         if [ -f /tmp/.salt/salt-thin.tgz ]
+         then
+             [ $($SUMCHECK /tmp/.salt/salt-thin.tgz | cut -f$CUT_MARK -d' ') = {{3}} ] && {{0}} tar opxzvf /tmp/.salt/salt-thin.tgz -C /tmp/.salt
+         else
+             install -m 0700 -d /tmp/.salt
+             echo "{1}"
+             echo "deploy"
+             exit 1
+         fi
       fi
+      echo {{4}} > /tmp/.salt/minion
       echo "{1}"
-      {{0}} $PYTHON $SALT --local --out json -l quiet {{1}}
-EOF\n'''.format(salt.__version__, RSTR)
+      {{0}} $PYTHON $SALT --local --out json -l quiet {{1}} -c /tmp/.salt
+EOF'''.format(salt.__version__, RSTR)
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +128,13 @@ class SSH(object):
     '''
     def __init__(self, opts):
         self.verify_env()
+        if salt.utils.verify.verify_socket(
+                opts['interface'],
+                opts['publish_port'],
+                opts['ret_port']):
+            self.event = salt.utils.event.MasterEvent(opts['sock_dir'])
+        else:
+            self.event = None
         self.opts = opts
         tgt_type = self.opts['selected_target_option'] \
                 if self.opts['selected_target_option'] else 'glob'
@@ -121,6 +160,7 @@ class SSH(object):
                 'timeout': self.opts.get('ssh_timeout', 60),
                 'sudo': self.opts.get('ssh_sudo', False),
                 }
+        self.serial = salt.payload.Serial(opts)
 
     def verify_env(self):
         '''
@@ -132,7 +172,7 @@ class SSH(object):
 
     def get_pubkey(self):
         '''
-        Return the keystring for the SSH public key
+        Return the key string for the SSH public key
         '''
         priv = self.opts.get(
                 'ssh_priv',
@@ -165,7 +205,7 @@ class SSH(object):
             if deploy.startswith(('n', 'N')):
                 return ret
             target['passwd'] = getpass.getpass(
-                    'Password for {0}@{1}:'.format(host, target['user'])
+                    'Password for {0}@{1}:'.format(target['user'], host)
                 )
             return self._key_deploy_run(host, target, True)
         return ret
@@ -197,65 +237,13 @@ class SSH(object):
                     **target)
             stdout, stderr = single.cmd_block()
             try:
-                data = json.loads(stdout)
+                data = salt.utils.find_json(stdout)
                 return {host: data.get('local', data)}
             except Exception:
                 if stderr:
                     return {host: stderr}
                 return {host: 'Bad Return'}
-
-    def process(self):
-        '''
-        Execute the desired routine on the specified systems
-        '''
-        running = {}
-        target_iter = self.targets.__iter__()
-        done = set()
-        while True:
-            if len(running) < self.opts.get('ssh_max_procs', 25):
-                try:
-                    host = next(target_iter)
-                except StopIteration:
-                    pass
-                for default in self.defaults:
-                    if not default in self.targets[host]:
-                        self.targets[host][default] = self.defaults[default]
-
-                if host not in running:
-                    single = Single(
-                            self.opts,
-                            self.opts['arg_str'],
-                            host,
-                            **self.targets[host])
-                    running[host] = {'iter': single.cmd(),
-                                     'single': single}
-            for host in running:
-                stdout, stderr = next(running[host]['iter'])
-                if stdout is None and stderr is None:
-                    continue
-                if stdout.startswith('deploy'):
-                    running[host]['single'].deploy()
-                    running[host]['iter'] = single.cmd()
-                else:
-                    # This job is done, yield
-                    id_ = running[host]['single'].id
-                    try:
-                        if not stdout and stderr:
-                            yield {id_: stderr}
-                        else:
-                            data = json.loads(stdout)
-                            if len(data) < 2 and 'local' in data:
-                                yield {id_: data['local']}
-                            else:
-                                yield {id_: data}
-                    except Exception:
-                        yield {id_: 'Bad Return'}
-                    done.add(host)
-            for host in done:
-                if host in running:
-                    running.pop(host)
-            if len(done) >= len(self.targets):
-                break
+        return ret
 
     def handle_routine(self, que, opts, host, target):
         '''
@@ -280,7 +268,7 @@ class SSH(object):
                 else:
                     ret['ret'] = stderr
             else:
-                data = json.loads(stdout)
+                data = salt.utils.find_json(stdout)
                 if len(data) < 2 and 'local' in data:
                     ret['ret'] = data['local']
                 else:
@@ -292,7 +280,7 @@ class SSH(object):
     def handle_ssh(self):
         '''
         Spin up the needed threads or processes and execute the subsequent
-        rouintes
+        routines
         '''
         que = multiprocessing.Queue()
         running = {}
@@ -351,17 +339,73 @@ class SSH(object):
         for ret in self.handle_ssh():
             yield ret
 
+    def cache_job(self, jid, id_, ret):
+        '''
+        Cache the job information
+        '''
+        jid_dir = salt.utils.jid_dir(
+                jid,
+                self.opts['cachedir'],
+                self.opts['hash_type']
+                )
+        if not os.path.isdir(jid_dir):
+            log.error(
+                'An inconsistency occurred, a job was received with a job id '
+                'that is not present on the master: {0}'.format(jid)
+            )
+            return False
+        if os.path.exists(os.path.join(jid_dir, 'nocache')):
+            return
+        hn_dir = os.path.join(jid_dir, id_)
+        if not os.path.isdir(hn_dir):
+            os.makedirs(hn_dir)
+        # Otherwise the minion has already returned this jid and it should
+        # be dropped
+        else:
+            log.error(
+                'An extra return was detected from minion {0}, please verify '
+                'the minion, this could be a replay attack'.format(
+                    id_
+                )
+            )
+            return False
+
+        self.serial.dump(
+            ret,
+            # Use atomic open here to avoid the file being read before it's
+            # completely written to. Refs #1935
+            salt.utils.atomicfile.atomic_open(
+                os.path.join(hn_dir, 'return.p'), 'w+'
+            )
+        )
+
     def run(self):
         '''
         Execute the overall routine
         '''
+        jid = salt.utils.prep_jid(
+                self.opts['cachedir'],
+                self.opts['hash_type'],
+                self.opts['user'])
+        if self.opts.get('verbose'):
+            msg = 'Executing job with jid {0}'.format(jid)
+            print(msg)
+            print('-' * len(msg) + '\n')
+            print('')
         for ret in self.handle_ssh():
             host = ret.keys()[0]
+            #self.cache_job(jid, host, ret)
             ret = self.key_deploy(host, ret)
             salt.output.display_output(
                     ret,
                     self.opts.get('output', 'nested'),
                     self.opts)
+            if self.event:
+                self.event.fire_event(
+                        ret,
+                        salt.utils.event.tagify(
+                            [jid, 'ret', host],
+                            'job'))
 
 
 class Single(object):
@@ -399,8 +443,8 @@ class Single(object):
                 'timeout': timeout,
                 'sudo': sudo,
                 'tty': tty}
-        self.shell = salt.client.ssh.shell.Shell(**args)
-
+        self.shell = salt.client.ssh.shell.Shell(opts, **args)
+        self.minion_config = yaml.dump({'root_dir': '/tmp/.salt/running_data'})
         self.target = kwargs
         self.target.update(args)
         self.serial = salt.payload.Serial(opts)
@@ -423,9 +467,6 @@ class Single(object):
         self.shell.send(
                 thin,
                 '/tmp/.salt/salt-thin.tgz')
-        self.shell.exec_cmd(
-                'tar xzvf /tmp/.salt/salt-thin.tgz -C /tmp/.salt'
-                )
         return True
 
     def run(self, deploy_attempted=False):
@@ -486,7 +527,8 @@ class Single(object):
                 self.opts,
                 self.id,
                 **self.target)
-            opts_pkg = pre_wrapper['test.opts_pkg']()
+            default_opts = pre_wrapper['test.opts_pkg']()
+            opts_pkg = dict(default_opts.items() + self.opts.items())
             pillar = salt.pillar.Pillar(
                     opts_pkg,
                     opts_pkg['grains'],
@@ -520,7 +562,7 @@ class Single(object):
 
     def cmd(self):
         '''
-        Prepare the precheck command to send to the subsystem
+        Prepare the pre-check command to send to the subsystem
         '''
         # 1. check if python is on the target
         # 2. check is salt-call is on the target
@@ -533,20 +575,40 @@ class Single(object):
                     self.sls_seed, self.arg)
             self.sls_seed(*args, **kwargs)
         sudo = 'sudo' if self.target['sudo'] else ''
-        cmd = SSH_SHIM.format(sudo, self.arg_str)
+        thin_sum = salt.utils.thin.thin_sum(
+                self.opts['cachedir'],
+                self.opts['hash_type'])
+        cmd = SSH_SHIM.format(
+                sudo,
+                self.arg_str,
+                self.opts['hash_type'],
+                thin_sum,
+                self.minion_config)
         for stdout, stderr in self.shell.exec_nb_cmd(cmd):
             yield stdout, stderr
 
     def cmd_block(self, is_retry=False):
         '''
-        Prepare the precheck command to send to the subsystem
+        Prepare the pre-check command to send to the subsystem
         '''
         # 1. check if python is on the target
         # 2. check is salt-call is on the target
         # 3. deploy salt-thin
         # 4. execute command
+        if self.arg_str.startswith('cmd.run'):
+            cmd_args = ' '.join(self.arg_str.split()[1:])
+            if not cmd_args.startswith("'") and not cmd_args.endswith("'"):
+                self.arg_str = "cmd.run '{0}'".format(cmd_args)
         sudo = 'sudo' if self.target['sudo'] else ''
-        cmd = SSH_SHIM.format(sudo, self.arg_str)
+        thin_sum = salt.utils.thin.thin_sum(
+                self.opts['cachedir'],
+                self.opts['hash_type'])
+        cmd = SSH_SHIM.format(
+                sudo,
+                self.arg_str,
+                self.opts['hash_type'],
+                thin_sum,
+                self.minion_config)
         log.debug("Performing shimmed command as follows:\n{0}".format(cmd))
         stdout, stderr = self.shell.exec_cmd(cmd)
 
@@ -559,12 +621,19 @@ class Single(object):
 
         if RSTR in stdout:
             stdout = stdout.split(RSTR)[1].strip()
+        if stdout.startswith('deploy'):
+            self.deploy()
+            stdout, stderr = self.shell.exec_cmd(cmd)
+            if RSTR in stdout:
+                stdout = stdout.split(RSTR)[1].strip()
 
         return stdout, stderr
 
     def categorize_shim_errors(self, stdout, stderr):
         perm_error_fmt = "Permissions problem, target user may need "\
                          "to be root or use sudo:\n {0}"
+        if stderr.startswith('Permission denied'):
+            return None
         errors = [
             ("sudo: no tty present and no askpass program specified",
                 "sudo expected a password, NOPASSWD required"),
@@ -585,10 +654,26 @@ class Single(object):
                 return error[1]
         return None
 
-    def sls_seed(self, mods, env='base', test=None, exclude=None, **kwargs):
+    def sls_seed(self,
+                 mods,
+                 saltenv='base',
+                 test=None,
+                 exclude=None,
+                 env=None,
+                 **kwargs):
         '''
         Create the seed file for a state.sls run
         '''
+        if env is not None:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+        # Backwards compatibility
+        saltenv = env
+
         wrapper = salt.client.ssh.wrapper.FunctionWrapper(
                 self.opts,
                 self.id,
@@ -599,7 +684,7 @@ class Single(object):
         st_ = SSHHighState(minion_opts, pillar, wrapper)
         if isinstance(mods, str):
             mods = mods.split(',')
-        high, errors = st_.render_highstate({env: mods})
+        high, errors = st_.render_highstate({saltenv: mods})
         if exclude:
             if isinstance(exclude, str):
                 exclude = exclude.split(',')
@@ -676,18 +761,20 @@ def lowstate_file_refs(chunks):
     '''
     refs = {}
     for chunk in chunks:
-        env = 'base'
+        saltenv = 'base'
         crefs = []
         for state in chunk:
             if state == '__env__':
-                env = chunk[state]
+                saltenv = chunk[state]
+            elif state == 'saltenv':
+                saltenv = chunk[state]
             elif state.startswith('__'):
                 continue
             crefs.extend(salt_refs(chunk[state]))
         if crefs:
-            if not env in refs:
-                refs[env] = []
-            refs[env].append(crefs)
+            if saltenv not in refs:
+                refs[saltenv] = []
+            refs[saltenv].append(crefs)
     return refs
 
 
@@ -719,14 +806,14 @@ def prep_trans_tar(opts, chunks, file_refs):
     lowfn = os.path.join(gendir, 'lowstate.json')
     with open(lowfn, 'w+') as fp_:
         fp_.write(json.dumps(chunks))
-    for env in file_refs:
-        env_root = os.path.join(gendir, env)
+    for saltenv in file_refs:
+        env_root = os.path.join(gendir, saltenv)
         if not os.path.isdir(env_root):
             os.makedirs(env_root)
-        for ref in file_refs[env]:
+        for ref in file_refs[saltenv]:
             for name in ref:
                 short = name[7:]
-                path = file_client.cache_file(name, env)
+                path = file_client.cache_file(name, saltenv)
                 if path:
                     tgt = os.path.join(env_root, short)
                     tgt_dir = os.path.dirname(tgt)
@@ -734,7 +821,7 @@ def prep_trans_tar(opts, chunks, file_refs):
                         os.makedirs(tgt_dir)
                     shutil.copy(path, tgt)
                     break
-                files = file_client.cache_dir(name, env, True)
+                files = file_client.cache_dir(name, saltenv, True)
                 if files:
                     for filename in files:
                         tgt = os.path.join(

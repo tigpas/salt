@@ -37,14 +37,14 @@ class RunnerClient(object):
         '''
         salt.utils.daemonize()
         event = salt.utils.event.MasterEvent(self.opts['sock_dir'])
-        data = {'fun': "runner.{0}".format(fun),
+        data = {'fun': 'runner.{0}'.format(fun),
                 'jid': jid,
                 'user': user,
                 }
         event.fire_event(data, tagify('new', base=tag))
 
         try:
-            data['ret'] = self.low(fun, low)
+            data['return'] = self.low(fun, low)
             data['success'] = True
         except Exception as exc:
             data['ret'] = 'Exception occured in runner {0}: {1}'.format(
@@ -108,7 +108,7 @@ class RunnerClient(object):
                 target=self._proc_runner,
                 args=(fun, low, user, tag, jid))
         proc.start()
-        return tag
+        return {'tag': tag}
 
     def master_call(self, **kwargs):
         '''

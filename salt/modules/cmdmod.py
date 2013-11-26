@@ -31,10 +31,11 @@ try:
 except ImportError:
     pass
 
+# Define the module's virtual name
+__virtualname__ = 'cmd'
 
 # Set up logging
 log = logging.getLogger(__name__)
-
 
 DEFAULT_SHELL = salt.grains.extra.shell()['shell']
 
@@ -44,16 +45,34 @@ def __virtual__():
     Overwriting the cmd python module makes debugging modules
     with pdb a bit harder so lets do it this way instead.
     '''
-    return 'cmd'
+    return __virtualname__
 
 
 def _chugid(runas):
     uinfo = pwd.getpwnam(runas)
     supgroups_seen = set()
-    supgroups = [g.gr_gid for g in grp.getgrall()
-                 if uinfo.pw_name in g.gr_mem and g.gr_gid != uinfo.pw_gid
-                 and g.gr_gid not in supgroups_seen and not supgroups_seen.add(g.gr_gid)]
 
+    # The line below used to exclude the current user's primary gid.
+    # However, when root belongs to more than one group
+    # this causes root's primary group of '0' to be dropped from
+    # his grouplist.  On FreeBSD, at least, this makes some
+    # command executions fail with 'access denied'.
+    #
+    # The Python documentation says that os.setgroups sets only
+    # the supplemental groups for a running process.  On FreeBSD
+    # this does not appear to be strictly true.
+
+    # supgroups = [
+    #     g.gr_gid for g in grp.getgrall()
+    #     if uinfo.pw_name in g.gr_mem and g.gr_gid != uinfo.pw_gid
+    #        and g.gr_gid not in supgroups_seen and not supgroups_seen.add(g.gr_gid)
+    # ]
+
+    supgroups = [g.gr_gid for g in grp.getgrall()
+                      if uinfo.pw_name in g.gr_mem
+                          and g.gr_gid not in supgroups_seen
+                          and not supgroups_seen.add(g.gr_gid)
+                ]
     # No logging can happen on this function
     #
     # 08:46:32,161 [salt.loaded.int.module.cmdmod:276 ][DEBUG   ] stderr: Traceback (most recent call last):
@@ -111,7 +130,7 @@ def _chugid_and_umask(runas, umask):
         os.umask(umask)
 
 
-def _render_cmd(cmd, cwd, template):
+def _render_cmd(cmd, cwd, template, saltenv='base'):
     '''
     If template is a valid template engine, process the cmd and cwd through
     that engine.
@@ -131,7 +150,7 @@ def _render_cmd(cmd, cwd, template):
     kwargs['pillar'] = __pillar__
     kwargs['grains'] = __grains__
     kwargs['opts'] = __opts__
-    kwargs['env'] = 'base'
+    kwargs['saltenv'] = saltenv
 
     def _render(contents):
         # write out path to temp file
@@ -167,6 +186,7 @@ def _run(cmd,
          quiet=False,
          runas=None,
          shell=DEFAULT_SHELL,
+         python_shell=True,
          env=(),
          clean_env=False,
          rstrip=True,
@@ -174,7 +194,8 @@ def _run(cmd,
          umask=None,
          timeout=None,
          with_communicate=True,
-         reset_system_locale=True):
+         reset_system_locale=True,
+         saltenv='base'):
     '''
     Do the DRY thing and only call subprocess.Popen() once
     '''
@@ -217,7 +238,7 @@ def _run(cmd,
             cmd = 'Powershell ' + cmd
 
     # munge the cmd and cwd through the template
-    (cmd, cwd) = _render_cmd(cmd, cwd, template)
+    (cmd, cwd) = _render_cmd(cmd, cwd, template, saltenv)
 
     ret = {}
 
@@ -244,8 +265,9 @@ def _run(cmd,
         try:
             pwd.getpwnam(runas)
         except KeyError:
-            msg = 'User \'{0}\' is not available'.format(runas)
-            raise CommandExecutionError(msg)
+            raise CommandExecutionError(
+                'User {0!r} is not available'.format(runas)
+            )
         try:
             # Getting the environment for the runas user
             # There must be a better way to do this.
@@ -262,7 +284,7 @@ def _run(cmd,
                            ).format(shell, runas, sys.executable)
             env_json = subprocess.Popen(
                 env_cmd,
-                shell=True,
+                shell=python_shell,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE
             ).communicate(py_code)[0]
@@ -272,8 +294,11 @@ def _run(cmd,
             env_runas.update(env)
             env = env_runas
         except ValueError:
-            msg = 'Environment could not be retrieved for User \'{0}\''.format(runas)
-            raise CommandExecutionError(msg)
+            raise CommandExecutionError(
+                'Environment could not be retrieved for User {0!r}'.format(
+                    runas
+                )
+            )
 
     if not salt.utils.is_true(quiet):
         # Put the most common case first
@@ -301,7 +326,7 @@ def _run(cmd,
         run_env.update(env)
 
     kwargs = {'cwd': cwd,
-              'shell': True,
+              'shell': python_shell,
               'env': run_env,
               'stdin': str(stdin) if stdin is not None else stdin,
               'stdout': stdout,
@@ -328,7 +353,8 @@ def _run(cmd,
     if not salt.utils.is_windows():
         # close_fds is not supported on Windows platforms if you redirect
         # stdin/stdout/stderr
-        kwargs['executable'] = shell
+        if kwargs['shell'] is True:
+            kwargs['executable'] = shell
         kwargs['close_fds'] = True
 
     if not os.path.isabs(cwd) or not os.path.isdir(cwd):
@@ -378,11 +404,13 @@ def _run_quiet(cmd,
                stdin=None,
                runas=None,
                shell=DEFAULT_SHELL,
+               python_shell=True,
                env=(),
                template=None,
                umask=None,
                timeout=None,
-               reset_system_locale=True):
+               reset_system_locale=True,
+               saltenv='base'):
     '''
     Helper for running commands quietly for minion startup
     '''
@@ -393,11 +421,13 @@ def _run_quiet(cmd,
                 stderr=subprocess.STDOUT,
                 quiet=True,
                 shell=shell,
+                python_shell=python_shell,
                 env=env,
                 template=template,
                 umask=umask,
                 timeout=timeout,
-                reset_system_locale=reset_system_locale)['stdout']
+                reset_system_locale=reset_system_locale,
+                saltenv=saltenv)['stdout']
 
 
 def _run_all_quiet(cmd,
@@ -405,11 +435,13 @@ def _run_all_quiet(cmd,
                    stdin=None,
                    runas=None,
                    shell=DEFAULT_SHELL,
+                   python_shell=True,
                    env=(),
                    template=None,
                    umask=None,
                    timeout=None,
-                   reset_system_locale=True):
+                   reset_system_locale=True,
+                   saltenv='base'):
     '''
     Helper for running commands quietly for minion startup.
     Returns a dict of return data
@@ -419,12 +451,14 @@ def _run_all_quiet(cmd,
                 cwd=cwd,
                 stdin=stdin,
                 shell=shell,
+                python_shell=python_shell,
                 env=env,
                 quiet=True,
                 template=template,
                 umask=umask,
                 timeout=timeout,
-                reset_system_locale=reset_system_locale)
+                reset_system_locale=reset_system_locale,
+                saltenv=saltenv)
 
 
 def run(cmd,
@@ -432,6 +466,7 @@ def run(cmd,
         stdin=None,
         runas=None,
         shell=DEFAULT_SHELL,
+        python_shell=True,
         env=(),
         clean_env=False,
         template=None,
@@ -440,6 +475,7 @@ def run(cmd,
         quiet=False,
         timeout=None,
         reset_system_locale=True,
+        saltenv='base',
         **kwargs):
     '''
     Execute the passed command and return the output as a string
@@ -478,6 +514,7 @@ def run(cmd,
     out = _run(cmd,
                runas=runas,
                shell=shell,
+               python_shell=python_shell,
                cwd=cwd,
                stdin=stdin,
                stderr=subprocess.STDOUT,
@@ -488,7 +525,8 @@ def run(cmd,
                umask=umask,
                quiet=quiet,
                timeout=timeout,
-               reset_system_locale=reset_system_locale)['stdout']
+               reset_system_locale=reset_system_locale,
+               saltenv=saltenv)['stdout']
     if not quiet:
         log.debug('output: {0}'.format(out))
     return out
@@ -499,6 +537,7 @@ def run_stdout(cmd,
                stdin=None,
                runas=None,
                shell=DEFAULT_SHELL,
+               python_shell=True,
                env=(),
                clean_env=False,
                template=None,
@@ -507,6 +546,7 @@ def run_stdout(cmd,
                quiet=False,
                timeout=None,
                reset_system_locale=True,
+               saltenv='base',
                **kwargs):
     '''
     Execute a command, and only return the standard out
@@ -541,6 +581,7 @@ def run_stdout(cmd,
                   cwd=cwd,
                   stdin=stdin,
                   shell=shell,
+                  python_shell=python_shell,
                   env=env,
                   clean_env=clean_env,
                   template=template,
@@ -548,7 +589,8 @@ def run_stdout(cmd,
                   umask=umask,
                   quiet=quiet,
                   timeout=timeout,
-                  reset_system_locale=reset_system_locale)["stdout"]
+                  reset_system_locale=reset_system_locale,
+                  saltenv=saltenv)['stdout']
     if not quiet:
         log.debug('stdout: {0}'.format(stdout))
     return stdout
@@ -559,6 +601,7 @@ def run_stderr(cmd,
                stdin=None,
                runas=None,
                shell=DEFAULT_SHELL,
+               python_shell=True,
                env=(),
                clean_env=False,
                template=None,
@@ -567,6 +610,7 @@ def run_stderr(cmd,
                quiet=False,
                timeout=None,
                reset_system_locale=True,
+               saltenv='base',
                **kwargs):
     '''
     Execute a command and only return the standard error
@@ -601,6 +645,7 @@ def run_stderr(cmd,
                   cwd=cwd,
                   stdin=stdin,
                   shell=shell,
+                  python_shell=python_shell,
                   env=env,
                   clean_env=clean_env,
                   template=template,
@@ -608,7 +653,8 @@ def run_stderr(cmd,
                   umask=umask,
                   quiet=quiet,
                   timeout=timeout,
-                  reset_system_locale=reset_system_locale)["stderr"]
+                  reset_system_locale=reset_system_locale,
+                  saltenv=saltenv)['stderr']
     if not quiet:
         log.debug('stderr: {0}'.format(stderr))
     return stderr
@@ -619,6 +665,7 @@ def run_all(cmd,
             stdin=None,
             runas=None,
             shell=DEFAULT_SHELL,
+            python_shell=True,
             env=(),
             clean_env=False,
             template=None,
@@ -627,6 +674,7 @@ def run_all(cmd,
             quiet=False,
             timeout=None,
             reset_system_locale=True,
+            saltenv='base',
             **kwargs):
     '''
     Execute the passed command and return a dict of return data
@@ -661,6 +709,7 @@ def run_all(cmd,
                cwd=cwd,
                stdin=stdin,
                shell=shell,
+               python_shell=python_shell,
                env=env,
                clean_env=clean_env,
                template=template,
@@ -668,13 +717,15 @@ def run_all(cmd,
                umask=umask,
                quiet=quiet,
                timeout=timeout,
-               reset_system_locale=reset_system_locale)
+               reset_system_locale=reset_system_locale,
+               saltenv=saltenv)
 
     if not quiet:
         if ret['retcode'] != 0:
             rcode = ret['retcode']
-            msg = 'Command \'{0}\' failed with return code: {1}'
-            log.error(msg.format(cmd, rcode))
+            log.error(
+                'Command {0!r} failed with return code: {1}'.format(cmd, rcode)
+            )
             # Don't log a blank line if there is no stderr or stdout
             if ret['stdout']:
                 log.error('stdout: {0}'.format(ret['stdout']))
@@ -694,13 +745,16 @@ def retcode(cmd,
             stdin=None,
             runas=None,
             shell=DEFAULT_SHELL,
+            python_shell=True,
             env=(),
             clean_env=False,
             template=None,
             umask=None,
             quiet=False,
             timeout=None,
-            reset_system_locale=True):
+            reset_system_locale=True,
+            saltenv='base',
+            **kwargs):
     '''
     Execute a shell command and return the command's return code.
 
@@ -734,6 +788,7 @@ def retcode(cmd,
                 cwd=cwd,
                 stdin=stdin,
                 shell=shell,
+                python_shell=python_shell,
                 env=env,
                 clean_env=clean_env,
                 template=template,
@@ -741,7 +796,8 @@ def retcode(cmd,
                 quiet=quiet,
                 timeout=timeout,
                 with_communicate=False,
-                reset_system_locale=reset_system_locale)['retcode']
+                reset_system_locale=reset_system_locale,
+                saltenv=saltenv)['retcode']
 
 
 def script(source,
@@ -750,12 +806,14 @@ def script(source,
            stdin=None,
            runas=None,
            shell=DEFAULT_SHELL,
+           python_shell=True,
            env=(),
            template='jinja',
            umask=None,
            timeout=None,
            reset_system_locale=True,
-           __env__='base',
+           __env__=None,
+           saltenv='base',
            **kwargs):
     '''
     Download a script from a remote location and execute the script locally.
@@ -784,32 +842,52 @@ def script(source,
 
         salt '*' cmd.script salt://scripts/runme.sh stdin='one\\ntwo\\nthree\\nfour\\nfive\\n'
     '''
+    def _cleanup_tempfile(path):
+        try:
+            os.remove(path)
+        except (IOError, OSError) as exc:
+            log.error('cmd.script: Unable to clean tempfile {0!r}: {1}'
+                      .format(path, exc))
 
-    if isinstance(env, string_types):
+    if isinstance(__env__, string_types):
         salt.utils.warn_until(
-            'Helium',
-            'Passing a salt environment should be done using \'__env__\' not '
-            '\'env\'. This functionality will be removed in Salt {version}.'
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' not '
+            '\'__env__\'. This functionality will be removed in Salt Boron.'
         )
         # Backwards compatibility
-        __env__ = env
+        saltenv = __env__
 
     if not salt.utils.is_windows():
         path = salt.utils.mkstemp(dir=cwd)
     else:
-        path = __salt__['cp.cache_file'](source, __env__)
+        path = __salt__['cp.cache_file'](source, saltenv)
         if not path:
+            _cleanup_tempfile(path)
             return {'pid': 0,
                     'retcode': 1,
                     'stdout': '',
                     'stderr': '',
                     'cache_error': True}
+
     if template:
-        __salt__['cp.get_template'](source, path, template, __env__, **kwargs)
+        fn_ = __salt__['cp.get_template'](source,
+                                          path,
+                                          template,
+                                          saltenv,
+                                          **kwargs)
+        if not fn_:
+            _cleanup_tempfile(path)
+            return {'pid': 0,
+                    'retcode': 1,
+                    'stdout': '',
+                    'stderr': '',
+                    'cache_error': True}
     else:
         if not salt.utils.is_windows():
-            fn_ = __salt__['cp.cache_file'](source, __env__)
+            fn_ = __salt__['cp.cache_file'](source, saltenv)
             if not fn_:
+                _cleanup_tempfile(path)
                 return {'pid': 0,
                         'retcode': 1,
                         'stdout': '',
@@ -825,10 +903,12 @@ def script(source,
                quiet=kwargs.get('quiet', False),
                runas=runas,
                shell=shell,
+               python_shell=python_shell,
                umask=umask,
                timeout=timeout,
-               reset_system_locale=reset_system_locale)
-    os.remove(path)
+               reset_system_locale=reset_system_locale,
+               saltenv=saltenv)
+    _cleanup_tempfile(path)
     return ret
 
 
@@ -837,12 +917,14 @@ def script_retcode(source,
                    stdin=None,
                    runas=None,
                    shell=DEFAULT_SHELL,
+                   python_shell=True,
                    env=(),
                    template='jinja',
                    umask=None,
                    timeout=None,
                    reset_system_locale=True,
-                   __env__='base',
+                   __env__=None,
+                   saltenv='base',
                    **kwargs):
     '''
     Download a script from a remote location and execute the script locally.
@@ -870,16 +952,27 @@ def script_retcode(source,
 
         salt '*' cmd.script_retcode salt://scripts/runme.sh stdin='one\\ntwo\\nthree\\nfour\\nfive\\n'
     '''
+    if isinstance(__env__, string_types):
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' not '
+            '\'env\'. This functionality will be removed in Salt Boron.'
+        )
+        # Backwards compatibility
+        saltenv = __env__
+
     return script(source=source,
                   cwd=cwd,
                   stdin=stdin,
                   runas=runas,
                   shell=shell,
+                  python_shell=python_shell,
                   env=env,
                   template=template,
                   umask=umask,
                   timeout=timeout,
                   reset_system_locale=reset_system_locale,
+                  saltenv=saltenv,
                   **kwargs)['retcode']
 
 

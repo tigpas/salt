@@ -1,5 +1,5 @@
 ======================
-Full Table of Contents
+Salt Table of Contents
 ======================
 
 .. toctree::
@@ -25,6 +25,7 @@ Full Table of Contents
     topics/projects/index
     topics/event/index
     topics/mine/*
+    topics/cloud/index
     topics/virt/*
     topics/ssh/*
     topics/tests/*
@@ -32,6 +33,7 @@ Full Table of Contents
     topics/conventions/*
     topics/git/*
     topics/development/index
+    topics/translating
 
     ref/configuration/logging/*
     ref/configuration/logging/handlers/*
@@ -53,6 +55,7 @@ Full Table of Contents
     ref/wheel/all/index
     ref/auth/all/index
     ref/output/all/index
+    ref/clouds/all/index
     ref/clients/index
     ref/peer
     ref/clientacl
@@ -74,5 +77,6 @@ Full Table of Contents
     ref/cli/salt-run
     ref/cli/salt-ssh
     ref/cli/salt-syndic
+    ref/cli/salt-cloud
 
     topics/releases/index

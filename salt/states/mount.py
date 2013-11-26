@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 '''
-Mounting of filesystems.
-========================
+Mounting of filesystems
+=======================
 
 Mount any type of mountable filesystem with the mounted function:
 
@@ -15,6 +15,9 @@ Mount any type of mountable filesystem with the mounted function:
         - opts:
           - defaults
 '''
+
+# Import python libs
+import os.path
 
 # Import salt libs
 from salt._compat import string_types
@@ -77,17 +80,22 @@ def mounted(name,
     elif opts is None:
         opts = ['defaults']
 
+    # remove possible trailing slash
+    name = name.rstrip("/")
+
     # Get the active data
     active = __salt__['mount.active']()
-    if name in active:
-        if active.__getitem__(name).__getitem__('device') != device:
+    real_name = os.path.realpath(name)
+    if real_name in active:
+        if device not in (active.__getitem__(real_name).__getitem__('device'),
+                          active.__getitem__(real_name).__getitem__('alt_device')):
             # name matches but device doesn't - need to umount
-            out = __salt__['mount.umount'](name)
+            out = __salt__['mount.umount'](real_name)
             active = __salt__['mount.active']()
         else:
             ret['comment'] = 'Target was already mounted'
     # using a duplicate check so I can catch the results of a umount
-    if name not in active:
+    if real_name not in active:
         # The mount is not present! Mount it
         if __opts__['test']:
             ret['result'] = None
@@ -101,12 +109,12 @@ def mounted(name,
             ret['comment'] = out
             ret['result'] = False
             return ret
-        elif name in active:
+        elif real_name in active:
             # (Re)mount worked!
             ret['comment'] = 'Target was successfully mounted'
             ret['changes']['mount'] = True
 
-    if persist and name in active:
+    if persist and real_name in active:
         if __opts__['test']:
             out = __salt__['mount.set_fstab'](name,
                                               device,
@@ -238,7 +246,7 @@ def unmounted(name,
               persist=False):
     '''
     .. note::
-        This state will be available in verion 0.17.0.
+        This state will be available in version 0.17.0.
 
     Verify that a device is not mounted
 

@@ -5,12 +5,12 @@ Support for ``pkgng``, the new package manager for FreeBSD
 .. warning::
 
     This module has been completely rewritten. Up to and includng version
-    0.17.0, it was available as the ``pkgng`` module, (``pkgng.install``,
+    0.17.x, it was available as the ``pkgng`` module, (``pkgng.install``,
     ``pkgng.delete``, etc.), but moving forward this module will no longer be
     available as ``pkgng``, as it will behave like a normal Salt ``pkg``
     provider. The documentation below should not be considered to apply to this
-    module in versions <= 0.17.0. If your minion is running one of these
-    versions, then the documentation for this module can be viewed using the
+    module in versions <= 0.17.x. If your minion is running a 0.17.x release or
+    older, then the documentation for this module can be viewed using the
     :mod:`sys.doc <salt.modules.sys.doc>` function:
 
     .. code-block:: bash
@@ -41,13 +41,16 @@ import salt.utils
 
 log = logging.getLogger(__name__)
 
+# Define the module's virtual name
+__virtualname__ = 'pkg'
+
 
 def __virtual__():
     '''
     Load as 'pkg' on FreeBSD 10 and greater
     '''
     if __grains__['os'] == 'FreeBSD' and float(__grains__['osrelease']) >= 10:
-        return 'pkg'
+        return __virtualname__
     return False
 
 
@@ -696,7 +699,7 @@ def install(name=None,
     __salt__['cmd.run_all'](cmd)
     __context__.pop(_contextkey(jail, chroot), None)
     new = list_pkgs(jail=jail, chroot=chroot)
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def remove(name=None,
@@ -833,7 +836,7 @@ def remove(name=None,
     __salt__['cmd.run_all'](cmd)
     __context__.pop(_contextkey(jail, chroot), None)
     new = list_pkgs(jail=jail, chroot=chroot)
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 # Support pkg.delete to remove packages, since this is the CLI usage
 delete = remove

@@ -46,7 +46,15 @@ MOCK_MODULES = [
     'yaml',
     'yaml.constructor',
     'yaml.nodes',
+    'yaml.scanner',
     'zmq',
+    # salt.cloud
+    'libcloud',
+    'libcloud.compute',
+    'libcloud.compute.base',
+    'libcloud.compute.deployment',
+    'libcloud.compute.providers',
+    'libcloud.compute.types',
     # modules, renderers, states, returners, et al
     'django',
     'libvirt',
@@ -101,14 +109,14 @@ intersphinx_mapping = {
 }
 # <---- Intersphinx Settings -------------------------------------------------
 
-# -- General configuration -----------------------------------------------------
+# -- General Configuration -----------------------------------------------------
 
 project = 'Salt'
 copyright = '2013 SaltStack, Inc.'
 
 version = salt.version.__version__
 #release = '.'.join(map(str, salt.version.__version_info__))
-release = '0.17.0'
+release = '0.17.2'
 
 language = 'en'
 locale_dirs = [
@@ -126,6 +134,7 @@ extensions = [
     'sphinx.ext.extlinks',
     'sphinx.ext.intersphinx',
     'youtube',
+    'saltautodoc'   # Needs to be listed AFTER sphunx.ext.autodoc
 ]
 
 modindex_common_prefix = ['salt.']
@@ -227,6 +236,7 @@ man_pages = [
     ('ref/cli/salt-syndic', 'salt-syndic', 'salt-syndic Documentation', authors, 1),
     ('ref/cli/salt-run', 'salt-run', 'salt-run Documentation', authors, 1),
     ('ref/cli/salt-ssh', 'salt-ssh', 'salt-ssh Documentation', authors, 1),
+    ('ref/cli/salt-cloud', 'salt-cloud', 'Salt Cloud Command', authors, 1),
 ]
 
 

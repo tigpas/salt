@@ -9,13 +9,13 @@
 
 %{!?python_sitelib: %global python_sitelib %(%{__python} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib())")}
 %{!?python_sitearch: %global python_sitearch %(%{__python} -c "from distutils.sysconfig import get_python_lib; print(get_python_lib(1))")}
-%{!?pythonpath: %global pythonpath %(%{__python} -c "import os, sys; print(os.pathsep.join(sys.path))")}
+%{!?pythonpath: %global pythonpath %(%{__python} -c "import os, sys; print(os.pathsep.join(x for x in sys.path if x))")}
 
 %define _salttesting SaltTesting
-%define _salttesting_ver 0.5.1
+%define _salttesting_ver 0.5.3
 
 Name: salt
-Version: 0.17.0
+Version: 0.17.2
 Release: 1%{?dist}
 Summary: A parallel remote execution system
 
@@ -318,7 +318,13 @@ rm -rf $RPM_BUILD_ROOT
 %endif
 
 %changelog
-* Mon Sep 30 2013 Erik Johnson <erik@saltstack.com> - 0.17.0-1
+* Mon Nov 18 2013 Erik Johnson <erik@saltstack.com> - 0.17.2-1
+- Update to bugfix release 0.17.2
+
+* Thu Oct 17 2013 Erik Johnson <erik@saltstack.com> - 0.17.1-1
+- Update to bugfix release 0.17.1
+
+* Thu Sep 26 2013 Erik Johnson <erik@saltstack.com> - 0.17.0-1
 - Update to feature release 0.17.0
 
 * Wed Sep 11 2013 David Anderson <dave@dubkat.com>

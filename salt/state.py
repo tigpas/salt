@@ -30,9 +30,10 @@ import salt.pillar
 import salt.fileclient
 import salt.utils.event
 import salt.syspaths as syspaths
+from salt.utils import context
 from salt._compat import string_types
 from salt.template import compile_template, compile_template_str
-from salt.exceptions import SaltReqTimeoutError, SaltException
+from salt.exceptions import SaltRenderError, SaltReqTimeoutError, SaltException
 
 log = logging.getLogger(__name__)
 
@@ -43,9 +44,15 @@ STATE_INTERNAL_KEYWORDS = frozenset([
     'fun',
     'order',
     'state',
+    'watch',
+    'watch_in',
+    'prereq',
+    'prereq_in',
     'require',
+    'require_in',
     'fail_hard',
     'reload_modules',
+    'saltenv',
     '__id__',
     '__sls__',
     '__env__',
@@ -55,7 +62,7 @@ STATE_INTERNAL_KEYWORDS = frozenset([
     '__pub_fun',
     '__pub_tgt',
     '__pub_ret',
-    '__pub_tgt_type'
+    '__pub_tgt_type',
 ])
 
 
@@ -170,11 +177,11 @@ def format_log(ret):
         log.info(str(ret))
 
 
-def master_compile(master_opts, minion_opts, grains, id_, env):
+def master_compile(master_opts, minion_opts, grains, id_, saltenv):
     '''
     Compile the master side low state data, and build the hidden state file
     '''
-    st_ = MasterHighState(master_opts, minion_opts, grains, id_, env)
+    st_ = MasterHighState(master_opts, minion_opts, grains, id_, saltenv)
     return st_.compile_highstate()
 
 
@@ -390,12 +397,19 @@ class Compiler(object):
             if 'order' in chunk:
                 if not isinstance(chunk['order'], int):
                     continue
-                if chunk['order'] > cap - 1 and chunk['order'] > 0:
-                    cap = chunk['order'] + 100
+
+                chunk_order = chunk['order']
+                if 'name_order' in chunk:
+                    chunk_order = chunk_order + chunk['name_order']
+
+                if chunk_order > cap - 1 and chunk_order > 0:
+                    cap = chunk_order + 100
         for chunk in chunks:
             if 'order' not in chunk:
                 chunk['order'] = cap
             else:
+                if isinstance(chunk['order'], int) and 'name_order' in chunk:
+                    chunk['order'] = chunk['order'] + chunk.pop('name_order')
                 if not isinstance(chunk['order'], int):
                     if chunk['order'] == 'last':
                         chunk['order'] = cap + 1000000
@@ -439,9 +453,12 @@ class Compiler(object):
                             else:
                                 chunk.update(arg)
                 if names:
+                    name_order = 1
                     for low_name in names:
                         live = copy.deepcopy(chunk)
                         live['name'] = low_name
+                        live['name_order'] = name_order
+                        name_order = name_order + 1
                         for fun in funcs:
                             live['fun'] = fun
                             chunks.append(live)
@@ -635,7 +652,7 @@ class State(object):
             errors.append('Missing "fun" data')
         if 'name' not in data:
             errors.append('Missing "name" data')
-        if not isinstance(data['name'], string_types):
+        if data['name'] and not isinstance(data['name'], string_types):
             err = ('The name {0} in sls {1} is not formed as a '
                    'string but is a {2}').format(
                            data['name'], data['__sls__'], type(data['name']))
@@ -851,12 +868,19 @@ class State(object):
             if 'order' in chunk:
                 if not isinstance(chunk['order'], int):
                     continue
-                if chunk['order'] > cap - 1 and chunk['order'] > 0:
-                    cap = chunk['order'] + 100
+
+                chunk_order = chunk['order']
+                if 'name_order' in chunk:
+                    chunk_order = chunk_order + chunk['name_order']
+
+                if chunk_order > cap - 1 and chunk_order > 0:
+                    cap = chunk_order + 100
         for chunk in chunks:
             if 'order' not in chunk:
                 chunk['order'] = cap
             else:
+                if isinstance(chunk['order'], int) and 'name_order' in chunk:
+                    chunk['order'] = chunk['order'] + chunk.pop('name_order')
                 if not isinstance(chunk['order'], int):
                     if chunk['order'] == 'last':
                         chunk['order'] = cap + 1000000
@@ -906,9 +930,12 @@ class State(object):
                             else:
                                 chunk[key] = val
                 if names:
+                    name_order = 1
                     for low_name in names:
                         live = copy.deepcopy(chunk)
                         live['name'] = low_name
+                        live['name_order'] = name_order
+                        name_order = name_order + 1
                         for fun in funcs:
                             live['fun'] = fun
                             chunks.append(live)
@@ -1235,12 +1262,33 @@ class State(object):
             test = sys.modules[self.states[cdata['full']].__module__].__opts__['test']
             sys.modules[self.states[cdata['full']].__module__].__opts__['test'] = True
         try:
-            if 'kwargs' in cdata:
-                ret = self.states[cdata['full']](
-                    *cdata['args'], **cdata['kwargs'])
+            # Let's get a reference to the salt environment to use within this
+            # state call.
+            #
+            # If the state function accepts an 'env' keyword argument, it
+            # allows the state to be overridden(we look for that in cdata). If
+            # that's not found in cdata, we look for what we're being passed in
+            # the original data, namely, the special dunder __env__. If that's
+            # not found we default to 'base'
+            if cdata['kwargs'].get('env', None) is not None:
+                # User is using a deprecated env setting which was parsed by
+                # format_call
+                saltenv = cdata['kwargs']['env']
+            elif '__env__' in data:
+                # The user is passing an alternative environment using __env__
+                # which is also not the appropriate choice, still, handle it
+                saltenv = data['__env__']
+            elif 'saltenv' in data:
+                saltenv = data['saltenv']
             else:
-                ret = self.states[cdata['full']](*cdata['args'])
-            self.verify_ret(ret)
+                # Let's use the default environment
+                saltenv = 'base'
+
+            with context.func_globals_inject(self.states[cdata['full']],
+                                             __env__=saltenv):
+                ret = self.states[cdata['full']](*cdata['args'],
+                                                 **cdata['kwargs'])
+                self.verify_ret(ret)
         except Exception:
             trb = traceback.format_exc()
             ret = {
@@ -1325,7 +1373,7 @@ class State(object):
         if pre:
             reqs['prerequired'] = []
         for r_state in reqs:
-            if r_state in low:
+            if r_state in low and low[r_state] is not None:
                 for req in low[r_state]:
                     req = trim_req(req)
                     found = False
@@ -1382,16 +1430,18 @@ class State(object):
             return 'change'
         return 'met'
 
-    def event(self, chunk_ret):
+    def event(self, chunk_ret, length):
         '''
         Fire an event on the master bus
         '''
-        if not self.opts.get('local') and self.opts.get('state_events', True):
+        if not self.opts.get('local') and self.opts.get('state_events', True) and self.opts.get('master_uri'):
+            ret = {'ret': chunk_ret,
+                   'len': length}
             tag = salt.utils.event.tagify(
                     [self.jid, 'prog', self.opts['id'], str(chunk_ret['__run_num__'])], 'job'
                     )
             preload = {'jid': self.jid}
-            self.functions['event.fire_master'](chunk_ret, tag, preload=preload)
+            self.functions['event.fire_master'](ret, tag, preload=preload)
 
     def call_chunk(self, low, running, chunks):
         '''
@@ -1458,7 +1508,7 @@ class State(object):
                                 'comment': comment,
                                 '__run_num__': self.__run_num}
                 self.__run_num += 1
-                self.event(running[tag])
+                self.event(running[tag], len(chunks))
                 return running
             for chunk in reqs:
                 # Check to see if the chunk has been run, only run it if
@@ -1480,7 +1530,7 @@ class State(object):
                                     'comment': 'Recursive requisite found',
                                     '__run_num__': self.__run_num}
                         self.__run_num += 1
-                        self.event(running[tag])
+                        self.event(running[tag], len(chunks))
                         return running
                     running = self.call_chunk(chunk, running, chunks)
                     if self.check_failhard(chunk, running):
@@ -1528,7 +1578,7 @@ class State(object):
             else:
                 running[tag] = self.call(low)
         if tag in running:
-            self.event(running[tag])
+            self.event(running[tag], len(chunks))
         return running
 
     def call_high(self, high):
@@ -1658,8 +1708,10 @@ class State(object):
 
 class BaseHighState(object):
     '''
-    The BaseHighState is the foundation of running a highstate, extend it and
-    add a self.state object of type State
+    The BaseHighState is an abstract base class that is the foundation of running a highstate, extend it and
+    add a self.state object of type State.
+
+    When extending this class, please note that self.client and self.matcher should be instantiated and handled.
     '''
     def __init__(self, opts):
         self.opts = self.__gen_opts(opts)
@@ -1672,8 +1724,8 @@ class BaseHighState(object):
         Gather the lists of available sls data from the master
         '''
         avail = {}
-        for env in self._get_envs():
-            avail[env] = self.client.list_states(env)
+        for saltenv in self._get_envs():
+            avail[saltenv] = self.client.list_states(saltenv)
         return avail
 
     def __gen_opts(self, opts):
@@ -1711,6 +1763,8 @@ class BaseHighState(object):
                     opts['state_auto_order'])
             opts['file_roots'] = mopts['file_roots']
             opts['state_events'] = mopts.get('state_events')
+            opts['jinja_lstrip_blocks'] = mopts.get('jinja_lstrip_blocks', False)
+            opts['jinja_trim_blocks'] = mopts.get('jinja_trim_blocks', False)
         return opts
 
     def _get_envs(self):
@@ -1743,53 +1797,53 @@ class BaseHighState(object):
                         )
                     ]
         else:
-            for env in self._get_envs():
-                tops[env].append(
+            for saltenv in self._get_envs():
+                tops[saltenv].append(
                         compile_template(
                             self.client.cache_file(
                                 self.opts['state_top'],
-                                env
+                                saltenv
                                 ),
                             self.state.rend,
                             self.state.opts['renderer'],
-                            env=env
+                            saltenv=saltenv
                             )
                         )
 
         # Search initial top files for includes
-        for env, ctops in tops.items():
+        for saltenv, ctops in tops.items():
             for ctop in ctops:
                 if 'include' not in ctop:
                     continue
                 for sls in ctop['include']:
-                    include[env].append(sls)
+                    include[saltenv].append(sls)
                 ctop.pop('include')
         # Go through the includes and pull out the extra tops and add them
         while include:
             pops = []
-            for env, states in include.items():
-                pops.append(env)
+            for saltenv, states in include.items():
+                pops.append(saltenv)
                 if not states:
                     continue
                 for sls_match in states:
-                    for sls in fnmatch.filter(self.avail[env], sls_match):
-                        if sls in done[env]:
+                    for sls in fnmatch.filter(self.avail[saltenv], sls_match):
+                        if sls in done[saltenv]:
                             continue
-                        tops[env].append(
+                        tops[saltenv].append(
                                 compile_template(
                                     self.client.get_state(
                                         sls,
-                                        env
+                                        saltenv
                                         ).get('dest', False),
                                     self.state.rend,
                                     self.state.opts['renderer'],
-                                    env=env
+                                    saltenv=saltenv
                                     )
                                 )
-                        done[env].append(sls)
-            for env in pops:
-                if env in include:
-                    include.pop(env)
+                        done[saltenv].append(sls)
+            for saltenv in pops:
+                if saltenv in include:
+                    include.pop(saltenv)
         return tops
 
     def merge_tops(self, tops):
@@ -1799,22 +1853,22 @@ class BaseHighState(object):
         top = collections.defaultdict(dict)
         for ctops in tops.values():
             for ctop in ctops:
-                for env, targets in ctop.items():
-                    if env == 'include':
+                for saltenv, targets in ctop.items():
+                    if saltenv == 'include':
                         continue
                     for tgt in targets:
-                        if tgt not in top[env]:
-                            top[env][tgt] = ctop[env][tgt]
+                        if tgt not in top[saltenv]:
+                            top[saltenv][tgt] = ctop[saltenv][tgt]
                             continue
                         matches = []
                         states = set()
-                        for comp in top[env][tgt]:
+                        for comp in top[saltenv][tgt]:
                             if isinstance(comp, dict):
                                 matches.append(comp)
                             if isinstance(comp, string_types):
                                 states.add(comp)
-                        top[env][tgt] = matches
-                        top[env][tgt].extend(list(states))
+                        top[saltenv][tgt] = matches
+                        top[saltenv][tgt].extend(list(states))
         return top
 
     def verify_tops(self, tops):
@@ -1826,19 +1880,21 @@ class BaseHighState(object):
             errors.append('Top data was not formed as a dict')
             # No further checks will work, bail out
             return errors
-        for env, matches in tops.items():
-            if env == 'include':
+        for saltenv, matches in tops.items():
+            if saltenv == 'include':
                 continue
-            if not isinstance(env, string_types):
-                err = ('Environment {0} in top file is not formed as a '
-                       'string').format(env)
-                errors.append(err)
-            if env == '':
+            if not isinstance(saltenv, string_types):
+                errors.append(
+                    'Environment {0} in top file is not formed as a '
+                    'string'.format(saltenv)
+                )
+            if saltenv == '':
                 errors.append('Empty environment statement in top file')
             if not isinstance(matches, dict):
-                err = ('The top file matches for environment {0} are not '
-                       'laid out as a dict').format(env)
-                errors.append(err)
+                errors.append(
+                    'The top file matches for environment {0} are not '
+                    'laid out as a dict'.format(saltenv)
+                )
             for slsmods in matches.values():
                 if not isinstance(slsmods, list):
                     errors.append('Malformed topfile (state declarations not '
@@ -1849,19 +1905,20 @@ class BaseHighState(object):
                         # This value is a match option
                         for val in slsmod.values():
                             if not val:
-                                err = ('Improperly formatted top file matcher '
-                                       'in environment {0}: {1} file'.format(
-                                           slsmod,
-                                           val
-                                           )
-                                       )
-                                errors.append(err)
+                                errors.append(
+                                    'Improperly formatted top file matcher '
+                                    'in environment {0}: {1} file'.format(
+                                        slsmod,
+                                        val
+                                    )
+                                )
                     elif isinstance(slsmod, string_types):
                         # This is a sls module
                         if not slsmod:
-                            err = ('Environment {0} contains an empty sls '
-                                   'index').format(env)
-                            errors.append(err)
+                            errors.append(
+                                'Environment {0} contains an empty sls '
+                                'index'.format(saltenv)
+                            )
 
         return errors
 
@@ -1878,12 +1935,12 @@ class BaseHighState(object):
         that this minion needs to execute.
 
         Returns:
-        {'env': ['state1', 'state2', ...]}
+        {'saltenv': ['state1', 'state2', ...]}
         '''
         matches = {}
-        for env, body in top.items():
+        for saltenv, body in top.items():
             if self.opts['environment']:
-                if env != self.opts['environment']:
+                if saltenv != self.opts['environment']:
                     continue
             for match, data in body.items():
                 if isinstance(data, string_types):
@@ -1893,17 +1950,18 @@ class BaseHighState(object):
                         data,
                         self.opts['nodegroups']
                         ):
-                    if env not in matches:
-                        matches[env] = []
+                    if saltenv not in matches:
+                        matches[saltenv] = []
                     for item in data:
                         if isinstance(item, string_types):
-                            matches[env].append(item)
+                            matches[saltenv].append(item)
         ext_matches = self.client.ext_nodes()
-        for env in ext_matches:
-            if env in matches:
-                matches[env] = list(set(ext_matches[env]).union(matches[env]))
+        for saltenv in ext_matches:
+            if saltenv in matches:
+                matches[saltenv] = list(
+                    set(ext_matches[saltenv]).union(matches[saltenv]))
             else:
-                matches[env] = ext_matches[env]
+                matches[saltenv] = ext_matches[saltenv]
         return matches
 
     def load_dynamic(self, matches):
@@ -1919,23 +1977,31 @@ class BaseHighState(object):
             self.state.opts['pillar'] = self.state._gather_pillar()
         self.state.module_refresh()
 
-    def render_state(self, sls, env, mods, matches):
+    def render_state(self, sls, saltenv, mods, matches):
         '''
         Render a state file and retrieve all of the include states
         '''
         err = ''
         errors = []
-        state_data = self.client.get_state(sls, env)
+        state_data = self.client.get_state(sls, saltenv)
         fn_ = state_data.get('dest', False)
         if not fn_:
-            errors.append(('Specified SLS {0} in environment {1} is not'
-                           ' available on the salt master').format(sls, env))
+            errors.append(
+                'Specified SLS {0} in environment {1} is not '
+                'available on the salt master'.format(sls, saltenv)
+            )
         state = None
         try:
             state = compile_template(
-                fn_, self.state.rend, self.state.opts['renderer'], env, sls,
-                rendered_sls=mods
+                fn_, self.state.rend, self.state.opts['renderer'], saltenv,
+                sls, rendered_sls=mods
             )
+        except SaltRenderError as exc:
+            msg = 'Rendering SLS "{0}:{1}" failed: {2}'.format(
+                saltenv, sls, exc
+            )
+            log.critical(msg)
+            errors.append(msg)
         except Exception as exc:
             msg = 'Rendering SLS {0} failed, render error: {1}'.format(
                 sls, exc
@@ -1962,13 +2028,13 @@ class BaseHighState(object):
                     else:
                         include = state.pop('include')
 
-                self._handle_extend(state, sls, env, errors)
-                self._handle_exclude(state, sls, env, errors)
-                self._handle_state_decls(state, sls, env, errors)
+                self._handle_extend(state, sls, saltenv, errors)
+                self._handle_exclude(state, sls, saltenv, errors)
+                self._handle_state_decls(state, sls, saltenv, errors)
 
                 for inc_sls in include:
                     # inc_sls may take the form of:
-                    #   'sls.to.include' <- same as {<env>: 'sls.to.include'}
+                    #   'sls.to.include' <- same as {<saltenv>: 'sls.to.include'}
                     #   {<env_key>: 'sls.to.include'}
                     #   {'_xenv': 'sls.to.resolve'}
                     xenv_key = '_xenv'
@@ -1976,7 +2042,7 @@ class BaseHighState(object):
                     if isinstance(inc_sls, dict):
                         env_key, inc_sls = inc_sls.popitem()
                     else:
-                        env_key = env
+                        env_key = saltenv
 
                     if inc_sls.startswith('.'):
                         p_comps = sls.split('.')
@@ -1987,7 +2053,7 @@ class BaseHighState(object):
 
                     if env_key != xenv_key:
                         # Resolve inc_sls in the specified environment
-                        if env_key in matches and fnmatch.filter(self.avail[env_key], inc_sls):
+                        if env_key in matches or fnmatch.filter(self.avail[env_key], inc_sls):
                             resolved_envs = [env_key]
                         else:
                             resolved_envs = []
@@ -2000,14 +2066,14 @@ class BaseHighState(object):
 
                     # An include must be resolved to a single environment, or
                     # the include must exist in the current environment
-                    if len(resolved_envs) == 1 or env in resolved_envs:
+                    if len(resolved_envs) == 1 or saltenv in resolved_envs:
                         # Match inc_sls against the available states in the
                         # resolved env, matching wildcards in the process. If
                         # there were no matches, then leave inc_sls as the
                         # target so that the next recursion of render_state
                         # will recognize the error.
                         sls_targets = fnmatch.filter(
-                            self.avail[env],
+                            self.avail[saltenv],
                             inc_sls
                         ) or [inc_sls]
 
@@ -2015,7 +2081,7 @@ class BaseHighState(object):
                             if sls_target not in mods:
                                 nstate, err = self.render_state(
                                     sls_target,
-                                    resolved_envs[0] if len(resolved_envs) == 1 else env,
+                                    resolved_envs[0] if len(resolved_envs) == 1 else saltenv,
                                     mods,
                                     matches
                                 )
@@ -2039,8 +2105,7 @@ class BaseHighState(object):
                                             inc_sls,
                                             ', '.join(resolved_envs))
                         log.critical(msg)
-                        if self.opts['failhard']:
-                            errors.append(msg)
+                        errors.append(msg)
                 self._handle_iorder(state)
         else:
             state = {}
@@ -2071,15 +2136,18 @@ class BaseHighState(object):
                                 if arg.keys()[0] == 'order':
                                     found = True
                     if not found:
+                        if not isinstance(state[name][s_dec], list):
+                            # quite certainly a syntax error, managed elsewhere
+                            continue
                         state[name][s_dec].append(
                                 {'order': self.iorder}
                                 )
                         self.iorder += 1
         return state
 
-    def _handle_state_decls(self, state, sls, env, errors):
+    def _handle_state_decls(self, state, sls, saltenv, errors):
         '''
-        Add sls and env components to the state
+        Add sls and saltenv components to the state
         '''
         for name in state:
             if not isinstance(state[name], dict):
@@ -2093,12 +2161,12 @@ class BaseHighState(object):
                     if '.' in state[name]:
                         comps = state[name].split('.')
                         state[name] = {'__sls__': sls,
-                                       '__env__': env,
+                                       '__env__': saltenv,
                                        comps[0]: [comps[1]]}
                         continue
                 errors.append(
-                    ('Name {0} in sls {1} is not a dictionary'
-                    .format(name, sls)))
+                    'Name {0} in sls {1} is not a dictionary'.format(name, sls)
+                )
                 continue
             skeys = set()
             for key in state[name]:
@@ -2132,9 +2200,9 @@ class BaseHighState(object):
             if '__sls__' not in state[name]:
                 state[name]['__sls__'] = sls
             if '__env__' not in state[name]:
-                state[name]['__env__'] = env
+                state[name]['__env__'] = saltenv
 
-    def _handle_extend(self, state, sls, env, errors):
+    def _handle_extend(self, state, sls, saltenv, errors):
         '''
         Take the extend dec out of state and apply to the highstate global
         dec
@@ -2154,7 +2222,7 @@ class BaseHighState(object):
                 if '__sls__' not in ext[name]:
                     ext[name]['__sls__'] = sls
                 if '__env__' not in ext[name]:
-                    ext[name]['__env__'] = env
+                    ext[name]['__env__'] = saltenv
                 for key in ext[name]:
                     if key.startswith('_'):
                         continue
@@ -2166,7 +2234,7 @@ class BaseHighState(object):
                         ext[name][comps[0]].append(comps[1])
             state.setdefault('__extend__', []).append(ext)
 
-    def _handle_exclude(self, state, sls, env, errors):
+    def _handle_exclude(self, state, sls, saltenv, errors):
         '''
         Take the exclude dec out of the state and apply it to the highstate
         global dec
@@ -2186,18 +2254,21 @@ class BaseHighState(object):
         '''
         highstate = {}
         all_errors = []
-        for env, states in matches.items():
+        for saltenv, states in matches.items():
             mods = set()
             for sls_match in states:
-                statefiles = fnmatch.filter(self.avail[env], sls_match)
+                statefiles = fnmatch.filter(self.avail[saltenv], sls_match)
                 if not statefiles:
                     # No matching sls file was found!  Output an error
-                    log.error(
-                            'No matching sls found for \'{0}\' in env \'{1}\''
-                            .format(sls_match, env)
+                    all_errors.append(
+                        'No matching sls found for {0!r} in env {1!r}'.format(
+                            sls_match, saltenv
+                        )
                     )
                 for sls in statefiles:
-                    state, errors = self.render_state(sls, env, mods, matches)
+                    if sls in mods:
+                        continue
+                    state, errors = self.render_state(sls, saltenv, mods, matches)
                     if state:
                         self.merge_included_states(highstate, state, errors)
                     all_errors.extend(errors)
@@ -2427,7 +2498,18 @@ class MasterHighState(HighState):
     '''
     Execute highstate compilation from the master
     '''
-    def __init__(self, master_opts, minion_opts, grains, id_, env=None):
+    def __init__(self, master_opts, minion_opts, grains, id_,
+                 saltenv=None,
+                 env=None):
+        if env is not None:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            # Backwards compatibility
+            saltenv = env
         # Force the fileclient to be local
         opts = copy.deepcopy(minion_opts)
         opts['file_client'] = 'local'

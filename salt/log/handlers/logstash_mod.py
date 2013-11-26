@@ -1,10 +1,5 @@
 # -*- coding: utf-8 -*-
 '''
-    :codeauthor: Pedro Algarvio (pedro@algarvio.me)
-    :copyright: © 2013 by the SaltStack Team, see AUTHORS for more details.
-    :license: Apache 2.0, see LICENSE for more details.
-
-
     Logstash Logging Handler
     ========================
 
@@ -23,7 +18,7 @@
 
         logstash_udp_handler:
           host: 127.0.0.1
-          port = 9999
+          port: 9999
 
 
     On the `Logstash`_ configuration file you need something like:
@@ -130,6 +125,9 @@ from salt.log.mixins import NewStyleClassMixIn
 
 log = logging.getLogger(__name__)
 
+# Define the module's virtual name
+__virtualname__ = 'logstash'
+
 
 def __virtual__():
     if not any(['logstash_udp_handler' in __opts__,
@@ -141,7 +139,7 @@ def __virtual__():
             'logging handlers module.'
         )
         return False
-    return 'logstash'
+    return __virtualname__
 
 
 def setup_handlers():
@@ -319,5 +317,6 @@ class ZMQLogstashHander(logging.Handler, NewStyleClassMixIn):
         self.publisher.send(formatted_object)
 
     def close(self):
-        # One second to send any queued messages
-        self._context.destroy(1 * 1000)
+        if self._context is not None:
+            # One second to send any queued messages
+            self._context.destroy(1 * 1000)

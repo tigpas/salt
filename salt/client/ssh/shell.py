@@ -29,6 +29,7 @@ class Shell(object):
     '''
     def __init__(
             self,
+            opts,
             host,
             user=None,
             port=None,
@@ -37,6 +38,7 @@ class Shell(object):
             timeout=None,
             sudo=False,
             tty=False):
+        self.opts = opts
         self.host = host
         self.user = user
         self.port = port
@@ -48,7 +50,7 @@ class Shell(object):
 
     def get_error(self, errstr):
         '''
-        Parse out an error and return a targetted error string
+        Parse out an error and return a targeted error string
         '''
         for line in errstr.split('\n'):
             if line.startswith('ssh:'):
@@ -65,12 +67,13 @@ class Shell(object):
         Return options for the ssh command base for Salt to call
         '''
         options = [
-                   'StrictHostKeyChecking=no',
                    'KbdInteractiveAuthentication=no',
                    'GSSAPIAuthentication=no',
                    'PasswordAuthentication=no',
                    ]
         options.append('ConnectTimeout={0}'.format(self.timeout))
+        if self.opts.get('ignore_host_keys'):
+            options.append('StrictHostKeyChecking=no')
         if self.port:
             options.append('Port={0}'.format(self.port))
         if self.priv:
@@ -88,13 +91,15 @@ class Shell(object):
         Return options to pass to sshpass
         '''
         # TODO ControlMaster does not work without ControlPath
-        # user could take advange of it if they set ControlPath in thier
+        # user could take advantage of it if they set ControlPath in their
         # ssh config.  Also, ControlPersist not widely available.
         options = ['ControlMaster=auto',
                    'StrictHostKeyChecking=no',
                    'GSSAPIAuthentication=no',
                    ]
         options.append('ConnectTimeout={0}'.format(self.timeout))
+        if self.opts.get('ignore_host_keys'):
+            options.append('StrictHostKeyChecking=no')
 
         if self.passwd:
             options.extend(['PasswordAuthentication=yes',
@@ -115,12 +120,32 @@ class Shell(object):
             ret.append('-o {0} '.format(option))
         return ''.join(ret)
 
-    def _copy_id_str(self):
+    def _copy_id_str_old(self):
         '''
         Return the string to execute ssh-copy-id
         '''
         if self.passwd and salt.utils.which('sshpass'):
-            return 'sshpass -p "{0}" {1} {2} "{3} -p {4} {5}@{6}"'.format(
+            # Using single quotes prevents shell expansion and
+            # passwords containig '$'
+            return "sshpass -p '{0}' {1} {2} '{3} -p {4} {5}@{6}'".format(
+                    self.passwd,
+                    'ssh-copy-id',
+                    '-i {0}.pub'.format(self.priv),
+                    self._passwd_opts(),
+                    self.port,
+                    self.user,
+                    self.host)
+        return None
+
+    def _copy_id_str_new(self):
+        '''
+        Since newer ssh-copy-id commands ingest option differently we need to
+        have two commands
+        '''
+        if self.passwd and salt.utils.which('sshpass'):
+            # Using single quotes prevents shell expansion and
+            # passwords containig '$'
+            return "sshpass -p '{0}' {1} {2} {3} -p {4} {5}@{6}".format(
                     self.passwd,
                     'ssh-copy-id',
                     '-i {0}.pub'.format(self.priv),
@@ -134,7 +159,9 @@ class Shell(object):
         '''
         Execute ssh-copy-id to plant the id file on the target
         '''
-        self._run_cmd(self._copy_id_str())
+        stdout, stderr = self._run_cmd(self._copy_id_str_old())
+        if stderr.startswith('Usage'):
+            self._run_cmd(self._copy_id_str_new())
 
     def _cmd_str(self, cmd, ssh='ssh'):
         '''
@@ -146,7 +173,9 @@ class Shell(object):
 
         if self.passwd and salt.utils.which('sshpass'):
             opts = self._passwd_opts()
-            return "sshpass -p '{0}' {1} {2} {3} {4} '{5}'".format(
+            # Using single quotes prevents shell expansion and
+            # passwords containig '$'
+            return "sshpass -p '{0}' {1} {2} {3} {4} {5}".format(
                     self.passwd,
                     ssh,
                     '' if ssh == 'scp' else self.host,
@@ -155,7 +184,7 @@ class Shell(object):
                     cmd)
         if self.priv:
             opts = self._key_opts()
-            return "{0} {1} {2} {3} '{4}'".format(
+            return "{0} {1} {2} {3} {4}".format(
                     ssh,
                     '' if ssh == 'scp' else self.host,
                     '-t -t' if self.tty else '',

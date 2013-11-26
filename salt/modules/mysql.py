@@ -3,6 +3,11 @@
 Module to provide MySQL compatibility to salt.
 
 :depends:   - MySQLdb Python module
+
+.. note::
+
+    On CentOS 5 (and possibly RHEL 5) both MySQL-python and python26-mysqldb need to be installed.
+
 :configuration: In order to connect to MySQL, certain configuration is required
     in /etc/salt/minion on the relevant minions. Some sample configs might look
     like::
@@ -30,6 +35,7 @@ import time
 import logging
 import re
 import sys
+import shlex
 
 # Import salt libs
 import salt.utils
@@ -146,6 +152,70 @@ def _connect(**kwargs):
 
     dbc.autocommit(True)
     return dbc
+
+
+def _grant_to_tokens(grant):
+    '''
+
+    This should correspond fairly closely to the YAML rendering of a mysql_grants state which comes out
+    as follows:
+
+     OrderedDict([('whatever_identifier', OrderedDict([('mysql_grants.present',
+     [OrderedDict([('database', 'testdb.*')]), OrderedDict([('user', 'testuser')]),
+     OrderedDict([('grant', 'ALTER, SELECT, LOCK TABLES')]), OrderedDict([('host', 'localhost')])])]))])
+
+    :param grant: An un-parsed MySQL GRANT statement str, like
+        "GRANT SELECT, ALTER, LOCK TABLES ON `testdb`.* TO 'testuser'@'localhost'"
+    :return:
+        A Python dict with the following keys/values:
+            - user: MySQL User
+            - host: MySQL host
+            - grant: [grant1, grant2] (ala SELECT, USAGE, etc)
+            - database: MySQL DB
+    '''
+    exploded_grant = shlex.split(grant)
+    grant_tokens = []
+    multiword_statement = []
+    position_tracker = 1  # Skip the initial 'GRANT' word token
+    phrase = 'grants'
+
+    for token in exploded_grant[position_tracker:]:
+
+        if token == 'ON':
+            phrase = 'db'
+            continue
+
+        elif token == 'TO':
+            phrase = 'user'
+            continue
+
+        if phrase == 'grants':
+            if token.endswith(',') \
+                    or exploded_grant[position_tracker + 1] == 'ON':  # Read-ahead
+                cleaned_token = token.rstrip(',')
+                if multiword_statement:
+                    multiword_statement.append(cleaned_token)
+                    grant_tokens.append(' '.join(multiword_statement))
+                    multiword_statement = []
+                else:
+                    grant_tokens.append(cleaned_token)
+
+            elif token[-1:] != ',':  # This is a multi-word, ala LOCK TABLES
+                multiword_statement.append(token)
+
+        elif phrase == 'db':
+            database = token.strip('`')
+            phrase = 'tables'
+
+        elif phrase == 'user':
+            user, host = token.split('@')
+
+        position_tracker += 1
+
+    return dict(user=user,
+                host=host,
+                grant=grant_tokens,
+                database=database)
 
 
 def query(database, query, **connection_args):
@@ -616,6 +686,7 @@ def user_exists(user,
                 password=None,
                 password_hash=None,
                 passwordless=False,
+                unix_socket=False,
                 **connection_args):
     '''
     Checks if a user exists on the MySQL server. A login can be checked to see
@@ -642,7 +713,10 @@ def user_exists(user,
            'Host = {1!r}'.format(user, host))
 
     if salt.utils.is_true(passwordless):
-        qry += ' AND Password = \'\''
+        if salt.utils.is_true(unix_socket):
+            qry += ' AND plugin={0!r}'.format('unix_socket')
+        else:
+            qry += ' AND Password = \'\''
     elif password:
         qry += ' AND Password = PASSWORD({0!r})'.format(password)
     elif password_hash:
@@ -695,6 +769,7 @@ def user_create(user,
                 password=None,
                 password_hash=None,
                 allow_passwordless=False,
+                unix_socket=False,
                 **connection_args):
     '''
     Creates a MySQL user
@@ -723,6 +798,9 @@ def user_create(user,
         If ``True``, then ``password`` and ``password_hash`` can be omitted (or
         set to ``None``) to permit a passwordless login.
 
+    unix_socket
+        If ``True`` and allow_passwordless is ``True`` then will be used unix_socket auth plugin.
+
     .. versionadded:: 0.16.2
         The ``allow_passwordless`` option was added.
 
@@ -748,7 +826,13 @@ def user_create(user,
         qry += ' IDENTIFIED BY {0!r}'.format(password)
     elif password_hash is not None:
         qry += ' IDENTIFIED BY PASSWORD {0!r}'.format(password_hash)
-    elif not salt.utils.is_true(allow_passwordless):
+    elif salt.utils.is_true(allow_passwordless):
+        if salt.utils.is_true(unix_socket):
+            if host == 'localhost':
+                qry += ' IDENTIFIED VIA unix_socket'
+            else:
+                log.error('Auth via unix_socket can be set only for host=localhost')
+    else:
         log.error('password or password_hash must be specified, unless '
                   'allow_passwordless=True')
         return False
@@ -778,6 +862,7 @@ def user_chpass(user,
                 password=None,
                 password_hash=None,
                 allow_passwordless=False,
+                unix_socket=None,
                 **connection_args):
     '''
     Change password for a MySQL user
@@ -835,6 +920,11 @@ def user_chpass(user,
     cur = dbc.cursor()
     qry = ('UPDATE mysql.user SET password={0} WHERE User={1!r} AND '
            'Host = {2!r};'.format(password_sql, user, host))
+    if salt.utils.is_true(allow_passwordless) and salt.utils.is_true(unix_socket):
+        if host == 'localhost':
+            qry += ' IDENTIFIED VIA unix_socket'
+        else:
+            log.error('Auth via unix_socket can be set only for host=localhost')
     log.debug('Query: {0}'.format(qry))
     try:
         result = cur.execute(qry)
@@ -896,6 +986,15 @@ def user_remove(user,
 
     log.info('User {0!r}@{1!r} has NOT been removed'.format(user, host))
     return False
+
+
+def tokenize_grant(grant):
+    '''
+    External wrapper function
+    :param grant:
+    :return: dict
+    '''
+    return _grant_to_tokens(grant)
 
 
 # Maintenance
@@ -1072,17 +1171,30 @@ def grant_exists(grant,
 
         salt '*' mysql.grant_exists 'SELECT,INSERT,UPDATE,...' 'database.*' 'frank' 'localhost'
     '''
-    # TODO: This function is a bit tricky, since it requires the ordering to
-    #       be exactly the same. Perhaps should be replaced/reworked with a
-    #       better/cleaner solution.
     target = __grant_generate(
         grant, database, user, host, grant_option, escape
     )
 
     grants = user_grants(user, host, **connection_args)
-    if grants is not False and target in grants:
-        log.debug('Grant exists.')
-        return True
+
+    for grant in grants:
+        try:
+            target_tokens = None
+            if not target_tokens:  # Avoid the overhead of re-calc in loop
+                target_tokens = _grant_to_tokens(target)
+            grant_tokens = _grant_to_tokens(grant)
+            if grant_tokens['user'] == target_tokens['user'] and \
+                    grant_tokens['database'] == target_tokens['database'] and \
+                    grant_tokens['host'] == target_tokens['host'] and \
+                    set(grant_tokens['grant']) == set(target_tokens['grant']):
+                log.debug(grant_tokens)
+                log.debug(target_tokens)
+                return True
+
+        except Exception as exc:  # Fallback to strict parsing
+            if grants is not False and target in grants:
+                log.debug('Grant exists.')
+                return True
 
     log.debug('Grant does not exist, or is perhaps not ordered properly?')
     return False

@@ -18,15 +18,24 @@ import salt.loader
 import salt.minion
 
 
-def sls(mods, env='base', test=None, exclude=None, **kwargs):
+def sls(mods, saltenv='base', test=None, exclude=None, env=None, **kwargs):
     '''
     Create the seed file for a state.sls run
     '''
+    if env is not None:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        # Backwards compatibility
+        saltenv = env
+
     __pillar__.update(kwargs.get('pillar', {}))
     st_ = salt.client.ssh.state.SSHHighState(__opts__, __pillar__, __salt__)
     if isinstance(mods, str):
         mods = mods.split(',')
-    high, errors = st_.render_highstate({env: mods})
+    high, errors = st_.render_highstate({saltenv: mods})
     if exclude:
         if isinstance(exclude, str):
             exclude = exclude.split(',')
@@ -52,13 +61,18 @@ def sls(mods, env='base', test=None, exclude=None, **kwargs):
             __opts__,
             chunks,
             file_refs)
+    trans_tar_sum = salt.utils.get_hash(trans_tar, __opts__['hash_type'])
+    cmd = 'state.pkg /tmp/.salt/salt_state.tgz test={0} pkg_sum={1} hash_type={2}'.format(
+            test,
+            trans_tar_sum,
+            __opts__['hash_type'])
     single = salt.client.ssh.Single(
             __opts__,
-            'state.pkg /tmp/salt_state.tgz test={0}'.format(test),
+            cmd,
             **__salt__.kwargs)
     single.shell.send(
             trans_tar,
-            '/tmp/salt_state.tgz')
+            '/tmp/.salt/salt_state.tgz')
     stdout, stderr = single.cmd_block()
     return json.loads(stdout, object_hook=salt.utils.decode_dict)
 
@@ -84,13 +98,17 @@ def low(data):
             __opts__,
             chunks,
             file_refs)
+    trans_tar_sum = salt.utils.get_hash(trans_tar, __opts__['hash_type'])
+    cmd = 'state.pkg /tmp/.salt/salt_state.tgz pkg_sum={0} hash_type={1}'.format(
+            trans_tar_sum,
+            __opts__['hash_type'])
     single = salt.client.ssh.Single(
             __opts__,
-            'state.pkg /tmp/salt_state.tgz',
+            cmd,
             **__salt__.kwargs)
     single.shell.send(
             trans_tar,
-            '/tmp/salt_state.tgz')
+            '/tmp/.salt/salt_state.tgz')
     stdout, stderr = single.cmd_block()
     return json.loads(stdout, object_hook=salt.utils.decode_dict)
 
@@ -113,13 +131,17 @@ def high(data):
             __opts__,
             chunks,
             file_refs)
+    trans_tar_sum = salt.utils.get_hash(trans_tar, __opts__['hash_type'])
+    cmd = 'state.pkg /tmp/.salt/salt_state.tgz pkg_sum={0} hash_type={1}'.format(
+            trans_tar_sum,
+            __opts__['hash_type'])
     single = salt.client.ssh.Single(
             __opts__,
-            'state.pkg /tmp/salt_state.tgz',
+            cmd,
             **__salt__.kwargs)
     single.shell.send(
             trans_tar,
-            '/tmp/salt_state.tgz')
+            '/tmp/.salt/salt_state.tgz')
     stdout, stderr = single.cmd_block()
     return json.loads(stdout, object_hook=salt.utils.decode_dict)
 
@@ -144,13 +166,18 @@ def highstate(test=None, **kwargs):
             __opts__,
             chunks,
             file_refs)
+    trans_tar_sum = salt.utils.get_hash(trans_tar, __opts__['hash_type'])
+    cmd = 'state.pkg /tmp/.salt/salt_state.tgz test={0} pkg_sum={1} hash_type={2}'.format(
+            test,
+            trans_tar_sum,
+            __opts__['hash_type'])
     single = salt.client.ssh.Single(
             __opts__,
-            'state.pkg /tmp/salt_state.tgz test={0}'.format(test),
+            cmd,
             **__salt__.kwargs)
     single.shell.send(
             trans_tar,
-            '/tmp/salt_state.tgz')
+            '/tmp/.salt/salt_state.tgz')
     stdout, stderr = single.cmd_block()
     return json.loads(stdout, object_hook=salt.utils.decode_dict)
 
@@ -179,13 +206,18 @@ def top(topfn, test=None, **kwargs):
             __opts__,
             chunks,
             file_refs)
+    trans_tar_sum = salt.utils.get_hash(trans_tar, __opts__['hash_type'])
+    cmd = 'state.pkg /tmp/.salt/salt_state.tgz test={0} pkg_sum={1} hash_type={2}'.format(
+            test,
+            trans_tar_sum,
+            __opts__['hash_type'])
     single = salt.client.ssh.Single(
             __opts__,
-            'state.pkg /tmp/salt_state.tgz test={0}'.format(test),
+            cmd,
             **__salt__.kwargs)
     single.shell.send(
             trans_tar,
-            '/tmp/salt_state.tgz')
+            '/tmp/.salt/salt_state.tgz')
     stdout, stderr = single.cmd_block()
     return json.loads(stdout, object_hook=salt.utils.decode_dict)
 
@@ -218,7 +250,7 @@ def show_lowstate():
     return st_.compile_low_chunks()
 
 
-def show_sls(mods, env='base', test=None, **kwargs):
+def show_sls(mods, saltenv='base', test=None, env=None, **kwargs):
     '''
     Display the state data from a specific sls or list of sls files on the
     master
@@ -229,13 +261,22 @@ def show_sls(mods, env='base', test=None, **kwargs):
 
         salt '*' state.show_sls core,edit.vim dev
     '''
+    if env is not None:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        # Backwards compatibility
+        saltenv = env
+
     opts = copy.copy(__opts__)
     if salt.utils.test_mode(test=test, **kwargs):
         opts['test'] = True
     else:
         opts['test'] = __opts__.get('test', None)
     st_ = salt.client.ssh.state.SSHHighState(__opts__, __pillar__, __salt__)
-    high, errors = st_.render_highstate({env: mods})
+    high, errors = st_.render_highstate({saltenv: mods})
     high, ext_errors = st_.state.reconcile_extend(high)
     errors += ext_errors
     errors += st_.state.verify_high(high)

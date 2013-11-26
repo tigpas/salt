@@ -28,6 +28,8 @@ def _clean_flags(args, caller):
     Sanitize flags passed into df
     '''
     flags = ''
+    if args is None:
+        return flags
     allowed = ('a', 'B', 'h', 'H', 'i', 'k', 'l', 'P', 't', 'T', 'x', 'v')
     for flag in args:
         if flag in allowed:
@@ -140,3 +142,42 @@ def inodeusage(args=None):
             log.warn("Problem parsing inode usage information")
             ret = {}
     return ret
+
+
+def percent(args=None):
+    '''
+    Return partion information for volumes mounted on this minion
+
+    CLI Example::
+
+        salt '*' disk.percent /var
+    '''
+    if __grains__['kernel'] == 'Linux':
+        cmd = 'df -P'
+    elif __grains__['kernel'] == 'OpenBSD':
+        cmd = 'df -kP'
+    else:
+        cmd = 'df'
+    ret = {}
+    out = __salt__['cmd.run'](cmd).splitlines()
+    for line in out:
+        if not line:
+            continue
+        if line.startswith('Filesystem'):
+            continue
+        comps = line.split()
+        while not comps[1].isdigit():
+            comps[0] = '{0} {1}'.format(comps[0], comps[1])
+            comps.pop(1)
+        try:
+            if __grains__['kernel'] == 'Darwin':
+                ret[comps[8]] = comps[4]
+            else:
+                ret[comps[5]] = comps[4]
+        except IndexError:
+            log.warn("Problem parsing disk usage information")
+            ret = {}
+    if args:
+        return ret[args]
+    else:
+        return ret

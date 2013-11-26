@@ -13,6 +13,9 @@ import salt.utils
 
 log = logging.getLogger(__name__)
 
+# Define the module's virtual name
+__virtualname__ = 'pkg'
+
 
 def __virtual__():
     '''
@@ -23,7 +26,7 @@ def __virtual__():
     # Not all versions of Suse use zypper, check that it is available
     if not salt.utils.which('zypper'):
         return False
-    return 'pkg'
+    return __virtualname__
 
 
 def list_upgrades(refresh=True):
@@ -224,6 +227,7 @@ def refresh_db():
 
 def install(name=None,
             refresh=False,
+            fromrepo=None,
             pkgs=None,
             sources=None,
             **kwargs):
@@ -246,6 +250,9 @@ def install(name=None,
 
     refresh
         Whether or not to refresh the package database before installing.
+
+    fromrepo
+        Specify a package repository to install from.
 
     version
         Can be either a version number, or the combination of a comparison
@@ -335,6 +342,11 @@ def install(name=None,
 
     old = list_pkgs()
     downgrades = []
+    if fromrepo:
+        fromrepoopt = "--from {0} ".format(fromrepo)
+        log.info('Targeting repo {0!r}'.format(fromrepo))
+    else:
+        fromrepoopt = ""
     # Split the targets into batches of 500 packages each, so that
     # the maximal length of the command line is not broken
     while targets:
@@ -342,8 +354,8 @@ def install(name=None,
         # output redirection characters "<" or ">" in zypper command.
         cmd = (
             'zypper --non-interactive install --name '
-            '--auto-agree-with-licenses "{0}"'
-            .format('" "'.join(targets[:500]))
+            '--auto-agree-with-licenses {0}"{1}"'
+            .format(fromrepoopt, '" "'.join(targets[:500]))
         )
         targets = targets[500:]
         stdout = __salt__['cmd.run_all'](cmd).get('stdout', '')
@@ -358,14 +370,14 @@ def install(name=None,
     while downgrades:
         cmd = (
             'zypper --non-interactive install --name '
-            '--auto-agree-with-licenses --force {0}'
-            .format(' '.join(downgrades[:500]))
+            '--auto-agree-with-licenses --force {0}{1}'
+            .format(fromrepoopt, ' '.join(downgrades[:500]))
         )
         __salt__['cmd.run_all'](cmd)
         downgrades = downgrades[500:]
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def upgrade(refresh=True):
@@ -390,7 +402,7 @@ def upgrade(refresh=True):
     __salt__['cmd.run_all'](cmd)
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def _uninstall(action='remove', name=None, pkgs=None):
@@ -413,7 +425,7 @@ def _uninstall(action='remove', name=None, pkgs=None):
         targets = targets[500:]
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def remove(name=None, pkgs=None, **kwargs):

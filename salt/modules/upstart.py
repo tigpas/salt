@@ -49,6 +49,9 @@ __func_alias__ = {
     'reload_': 'reload'
 }
 
+# Define the module's virtual name
+__virtualname__ = 'service'
+
 
 def __virtual__():
     '''
@@ -56,7 +59,13 @@ def __virtual__():
     '''
     # Disable on these platforms, specific service modules exist:
     if __grains__['os'] in ('Ubuntu', 'Linaro', 'elementary OS'):
-        return 'service'
+        return __virtualname__
+    elif __grains__['os'] in ('Debian', 'Raspbian'):
+        debian_initctl = '/sbin/initctl'
+        if os.path.isfile(debian_initctl):
+            initctl_version = salt.modules.cmdmod._run_quiet(debian_initctl + ' version')
+            if 'upstart' in initctl_version:
+                return 'service'
     return False
 
 
@@ -267,6 +276,21 @@ def available(name):
         salt '*' service.available sshd
     '''
     return name in get_all()
+
+
+def missing(name):
+    '''
+    The inverse of service.available.
+    Returns ``True`` if the specified service is not available, otherwise returns
+    ``False``.
+
+    CLI Example:
+
+    .. code-block:: bash
+
+        salt '*' service.missing sshd
+    '''
+    return not name in get_all()
 
 
 def get_all():

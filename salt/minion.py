@@ -142,24 +142,47 @@ def parse_args_and_kwargs(func, args, data=None):
     This is to prevent things like 'echo "Hello: world"' to be parsed as
     dictionaries.
     '''
-    spec_args, _, has_kwargs, _ = salt.utils.get_function_argspec(func)
+    argspec = salt.utils.get_function_argspec(func)
     _args = []
     kwargs = {}
+    invalid_kwargs = []
+
     for arg in args:
+        # support old yamlify syntax
         if isinstance(arg, string_types):
             arg_name, arg_value = salt.utils.parse_kwarg(arg)
             if arg_name:
-                if has_kwargs or arg_name in spec_args:
+                if argspec.keywords or arg_name in argspec.args:
+                    # Function supports **kwargs or is a positional argument to
+                    # the function.
                     kwargs[arg_name] = yamlify_arg(arg_value)
                     continue
-            else:
-                # Not a kwarg
-                pass
+
+                # **kwargs not in argspec and parsed argument name not in
+                # list of positional arguments. This keyword argument is
+                # invalid.
+                invalid_kwargs.append(arg)
+
+        # if the arg is a dict with __kwarg__ == True, then its a kwarg
+        elif isinstance(arg, dict) and arg.get('__kwarg__') is True:
+            for key, val in arg.iteritems():
+                if key == '__kwarg__':
+                    continue
+                kwargs[key] = val
+            continue
         _args.append(yamlify_arg(arg))
-    if has_kwargs and isinstance(data, dict):
+    if argspec.keywords and isinstance(data, dict):
         # this function accepts **kwargs, pack in the publish data
         for key, val in data.items():
             kwargs['__pub_{0}'.format(key)] = val
+
+    log.debug('Parsed args: {0}'.format(_args))
+    log.debug('Parsed kwargs: {0}'.format(kwargs))
+    if invalid_kwargs:
+        raise SaltInvocationError(
+            'The following keyword arguments are not valid: {0}'
+            .format(', '.join(invalid_kwargs))
+        )
     return _args, kwargs
 
 
@@ -213,6 +236,8 @@ class SMinion(object):
         # module
         opts['grains'] = salt.loader.grains(opts)
         self.opts = opts
+
+        # Clean out the proc directory (default /var/cache/salt/minion/proc)
         if self.opts.get('file_client', 'remote') == 'remote':
             if isinstance(self.opts['master'], list):
                 masters = self.opts['master']
@@ -501,6 +526,7 @@ class Minion(object):
             self.opts,
             self.functions,
             self.returners)
+        self.grains_cache = self.opts['grains']
 
     def __prep_mod_opts(self):
         '''
@@ -551,7 +577,8 @@ class Minion(object):
         '''
         load = {'id': self.opts['id'],
                 'cmd': '_minion_event',
-                'pretag': pretag}
+                'pretag': pretag,
+                'tok': self.tok}
         if events:
             load['events'] = events
         elif data and tag:
@@ -596,6 +623,13 @@ class Minion(object):
            or 'arg' not in data:
             return
         # Verify that the publication applies to this minion
+
+        # It's important to note that the master does some pre-processing
+        # to determine which minions to send a request to. So for example,
+        # a "salt -G 'grain_key:grain_val' test.ping" will invoke some
+        # pre-processing on the master and this minion should not see the
+        # publication if the master does not determine that it should.
+
         if 'tgt_type' in data:
             match_func = getattr(self.matcher,
                                  '{0}_match'.format(data['tgt_type']), None)
@@ -891,7 +925,7 @@ class Minion(object):
         Execute a state run based on information set in the minion config file
         '''
         if self.opts['startup_states']:
-            data = {'jid': 'req', 'ret': self.opts['ext_job_cache']}
+            data = {'jid': 'req', 'ret': self.opts.get('ext_job_cache', '')}
             if self.opts['startup_states'] == 'sls':
                 data['fun'] = 'state.sls'
                 data['arg'] = [self.opts['sls_list']]
@@ -902,6 +936,24 @@ class Minion(object):
                 data['fun'] = 'state.highstate'
                 data['arg'] = []
             self._handle_decoded_payload(data)
+
+    def _refresh_grains_watcher(self, refresh_interval_in_minutes):
+        '''
+        Create a loop that will fire a pillar refresh to inform a master about a change in the grains of this minion
+        :param refresh_interval_in_minutes:
+        :return: None
+        '''
+        if '__update_grains' not in self.opts.get('schedule', {}):
+            if not 'schedule' in self.opts:
+                self.opts['schedule'] = {}
+            self.opts['schedule'].update({
+                '__update_grains':
+                    {
+                        'function': 'event.fire',
+                        'args': [{}, "grains_refresh"],
+                        'minutes': refresh_interval_in_minutes
+                    }
+            })
 
     @property
     def master_pub(self):
@@ -924,6 +976,7 @@ class Minion(object):
             )
         )
         auth = salt.crypt.Auth(self.opts)
+        self.tok = auth.gen_token('salt')
         acceptance_wait_time = self.opts['acceptance_wait_time']
         acceptance_wait_time_max = self.opts['acceptance_wait_time_max']
         if not acceptance_wait_time_max:
@@ -973,6 +1026,7 @@ class Minion(object):
     def tune_in(self):
         '''
         Lock onto the publisher. This is the main event loop for the minion
+        :rtype : None
         '''
         try:
             log.info(
@@ -1125,6 +1179,29 @@ class Minion(object):
         time.sleep(.5)
 
         loop_interval = int(self.opts['loop_interval'])
+
+        try:
+            if self.opts['grains_refresh_every']:  # If exists and is not zero. In minutes, not seconds!
+                if self.opts['grains_refresh_every'] > 1:
+                    log.debug(
+                        'Enabling the grains refresher. Will run every {0} minutes.'.format(
+                            self.opts['grains_refresh_every'])
+                    )
+                else:  # Clean up minute vs. minutes in log message
+                    log.debug(
+                        'Enabling the grains refresher. Will run every {0} minute.'.format(
+                            self.opts['grains_refresh_every'])
+
+                    )
+                self._refresh_grains_watcher(
+                    abs(self.opts['grains_refresh_every'])
+                )
+        except Exception as exc:
+            log.error(
+                'Exception occurred in attempt to initialize grain refresh routine during minion tune-in: {0}'.format(
+                    exc)
+            )
+
         while True:
             try:
                 self.schedule.eval()
@@ -1155,6 +1232,10 @@ class Minion(object):
                                 self.module_refresh()
                             elif package.startswith('pillar_refresh'):
                                 self.pillar_refresh()
+                            elif package.startswith('grains_refresh'):
+                                if self.grains_cache != self.opts['grains']:
+                                    self.pillar_refresh()
+                                    self.grains_cache = self.opts['grains']
                             self.epub_sock.send(package)
                     except Exception:
                         pass

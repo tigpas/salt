@@ -16,6 +16,13 @@ warnings.filterwarnings(
     r'^(salt|salt\.(.*))$'  # Match module(s) 'salt' and 'salt.<whatever>'
 )
 
+# While we are supporting Python2.6, hide nested with-statements warnings
+warnings.filterwarnings(
+    'ignore',
+    'With-statements now directly support multiple context managers',
+    DeprecationWarning
+)
+
 # Import salt libs
 # We import log ASAP because we NEED to make sure that any logger instance salt
 # instantiates is using salt.log.setup.SaltLoggingClass
@@ -76,9 +83,9 @@ class Master(parsers.MasterOptionParser):
                     pki_dir=self.config['pki_dir'],
                 )
                 logfile = self.config['log_file']
-                if logfile is not None and not logfile.startswith('tcp://') \
-                        and not logfile.startswith('udp://') \
-                        and not logfile.startswith('file://'):
+                if logfile is not None and not logfile.startswith(('tcp://',
+                                                                   'udp://',
+                                                                   'file://')):
                     # Logfile is not using Syslog, verify
                     verify_files([logfile], self.config['user'])
         except OSError as err:
@@ -171,9 +178,9 @@ class Minion(parsers.MinionOptionParser):
                     pki_dir=self.config['pki_dir'],
                 )
                 logfile = self.config['log_file']
-                if logfile is not None and not logfile.startswith('tcp://') \
-                        and not logfile.startswith('udp://') \
-                        and not logfile.startswith('file://'):
+                if logfile is not None and not logfile.startswith(('tcp://',
+                                                                   'udp://',
+                                                                   'file://')):
                     # Logfile is not using Syslog, verify
                     verify_files([logfile], self.config['user'])
         except OSError as err:
@@ -256,9 +263,9 @@ class Syndic(parsers.SyndicOptionParser):
                     pki_dir=self.config['pki_dir'],
                 )
                 logfile = self.config['log_file']
-                if logfile is not None and not logfile.startswith('tcp://') \
-                        and not logfile.startswith('udp://') \
-                        and not logfile.startswith('file://'):
+                if logfile is not None and not logfile.startswith(('tcp://',
+                                                                   'udp://',
+                                                                   'file://')):
                     # Logfile is not using Syslog, verify
                     verify_files([logfile], self.config['user'])
         except OSError as err:

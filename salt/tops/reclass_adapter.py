@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 '''
+Read tops data from a reclass database
+
 .. |reclass| replace:: **reclass**
 
 This :doc:`master_tops </topics/master_tops/index>` plugin provides access to
@@ -58,11 +60,14 @@ from salt.utils.reclass import (
 
 from salt.exceptions import SaltInvocationError
 
+# Define the module's virtual name
+__virtualname__ = 'reclass'
+
 
 def __virtual__(retry=False):
     try:
         import reclass
-        return 'reclass'
+        return __virtualname__
     except ImportError:
         if retry:
             return False

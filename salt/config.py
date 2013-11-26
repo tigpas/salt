@@ -10,6 +10,7 @@ import re
 import socket
 import logging
 import urlparse
+from copy import deepcopy
 
 # import third party libs
 import yaml
@@ -26,6 +27,9 @@ import salt.utils
 import salt.utils.network
 import salt.pillar
 import salt.syspaths as syspaths
+
+# Import salt cloud libs
+import salt.cloud.exceptions
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +132,8 @@ VALID_OPTS = {
     'hgfs_remotes': list,
     'hgfs_root': str,
     'hgfs_branch_method': str,
+    'svnfs_remotes': list,
+    'svnfs_root': str,
     'ext_pillar': list,
     'pillar_version': int,
     'pillar_opts': bool,
@@ -144,6 +150,7 @@ VALID_OPTS = {
     'fileserver_backend': list,
     'fileserver_followsymlinks': bool,
     'fileserver_ignoresymlinks': bool,
+    'fileserver_limit_traversal': bool,
     'max_open_files': int,
     'auto_accept': bool,
     'master_tops': bool,
@@ -163,6 +170,12 @@ VALID_OPTS = {
     'win_repo_mastercachefile': str,
     'win_gitrepos': list,
     'modules_max_memory': int,
+    'grains_refresh_every': int,
+    'enable_lspci': bool,
+    'syndic_wait': int,
+    'jinja_lstrip_blocks': bool,
+    'jinja_trim_blocks': bool,
+    'minion_id_caching': bool,
 }
 
 # default configurations
@@ -191,6 +204,7 @@ DEFAULT_MINION_OPTS = {
     'file_roots': {
         'base': [syspaths.BASE_FILE_ROOTS_DIR],
     },
+    'fileserver_limit_traversal': False,
     'pillar_roots': {
         'base': [syspaths.BASE_PILLAR_ROOTS_DIR],
     },
@@ -223,6 +237,7 @@ DEFAULT_MINION_OPTS = {
     'log_fmt_logfile': _DFLT_LOG_FMT_LOGFILE,
     'log_granular_levels': {},
     'test': False,
+    'ext_job_cache': '',
     'cython_enable': False,
     'state_verbose': True,
     'state_output': 'full',
@@ -250,12 +265,14 @@ DEFAULT_MINION_OPTS = {
     'tcp_keepalive_cnt': -1,
     'tcp_keepalive_intvl': -1,
     'modules_max_memory': -1,
+    'grains_refresh_every': 0,
+    'minion_id_caching': True,
 }
 
 DEFAULT_MASTER_OPTS = {
     'interface': '0.0.0.0',
     'publish_port': '4505',
-    'pub_hwm': 100,
+    'pub_hwm': 1000,
     'auth_mode': 1,
     'user': 'root',
     'worker_threads': 5,
@@ -281,6 +298,8 @@ DEFAULT_MASTER_OPTS = {
     'hgfs_remotes': [],
     'hgfs_root': '',
     'hgfs_branch_method': 'branches',
+    'svnfs_remotes': [],
+    'svnfs_root': '',
     'ext_pillar': [],
     'pillar_version': 2,
     'pillar_opts': True,
@@ -299,6 +318,7 @@ DEFAULT_MASTER_OPTS = {
     'fileserver_backend': ['roots'],
     'fileserver_followsymlinks': True,
     'fileserver_ignoresymlinks': False,
+    'fileserver_limit_traversal': False,
     'max_open_files': 100000,
     'hash_type': 'md5',
     'conf_file': os.path.join(syspaths.CONFIG_DIR, 'master'),
@@ -340,6 +360,7 @@ DEFAULT_MASTER_OPTS = {
     'loop_interval': 60,
     'nodegroups': {},
     'cython_enable': False,
+    'enable_gpu_grains': False,
     # XXX: Remove 'key_logfile' support in 0.18.0
     'key_logfile': os.path.join(syspaths.LOGS_DIR, 'key'),
     'verify_env': True,
@@ -349,7 +370,45 @@ DEFAULT_MASTER_OPTS = {
     'win_repo_mastercachefile': os.path.join(syspaths.BASE_FILE_ROOTS_DIR,
                                              'win', 'repo', 'winrepo.p'),
     'win_gitrepos': ['https://github.com/saltstack/salt-winrepo.git'],
+    'syndic_wait': 1,
+    'jinja_lstrip_blocks': False,
+    'jinja_trim_blocks': False,
 }
+
+# ----- Salt Cloud Configuration Defaults ----------------------------------->
+CLOUD_CONFIG_DEFAULTS = {
+    'conf_dir': '/etc/salt',
+    'verify_env': True,
+    'default_include': 'cloud.conf.d/*.conf',
+    # Global defaults
+    'ssh_auth': '',
+    'keysize': 4096,
+    'os': '',
+    'script': 'bootstrap-salt',
+    'start_action': None,
+    'enable_hard_maps': False,
+    'delete_sshkeys': False,
+    # Custom deploy scripts
+    'deploy_scripts_search_path': 'cloud.deploy.d',
+    # Logging defaults
+    'log_file': '/var/log/salt/cloud',
+    'log_level': None,
+    'log_level_logfile': None,
+    'log_datefmt': _DFLT_LOG_DATEFMT,
+    'log_datefmt_logfile': _DFLT_LOG_DATEFMT_LOGFILE,
+    'log_fmt_console': _DFLT_LOG_FMT_CONSOLE,
+    'log_fmt_logfile': _DFLT_LOG_FMT_LOGFILE,
+    'log_granular_levels': {},
+}
+
+VM_CONFIG_DEFAULTS = {
+    'default_include': 'cloud.profiles.d/*.conf',
+}
+
+PROVIDER_CONFIG_DEFAULTS = {
+    'default_include': 'cloud.providers.d/*.conf',
+}
+# <---- Salt Cloud Configuration Defaults ------------------------------------
 
 
 def _validate_file_roots(opts):
@@ -361,9 +420,9 @@ def _validate_file_roots(opts):
         log.warning('The file_roots parameter is not properly formatted,'
                     ' using defaults')
         return {'base': [syspaths.BASE_FILE_ROOTS_DIR]}
-    for env, dirs in list(opts['file_roots'].items()):
+    for saltenv, dirs in list(opts['file_roots'].items()):
         if not isinstance(dirs, list) and not isinstance(dirs, tuple):
-            opts['file_roots'][env] = []
+            opts['file_roots'][saltenv] = []
     return opts['file_roots']
 
 
@@ -422,7 +481,21 @@ def _append_domain(opts):
 def _read_conf_file(path):
     log.debug('Reading configuration from {0}'.format(path))
     with salt.utils.fopen(path, 'r') as conf_file:
-        conf_opts = yaml.safe_load(conf_file.read()) or {}
+        try:
+            conf_opts = yaml.safe_load(conf_file.read()) or {}
+        except yaml.YAMLError as err:
+            log.error(
+                'Error parsing configuration file: {0} - {1}'.format(path, err)
+            )
+            conf_opts = {}
+        # only interpret documents as a valid conf, not things like strings,
+        # which might have been caused by invalid yaml syntax
+        if not isinstance(conf_opts, dict):
+            log.error(
+                'Error parsing configuration file: {0} - conf should be a '
+                'document, not {1}.'.format(path, type(conf_opts))
+            )
+            conf_opts = {}
         # allow using numeric ids: convert int to string
         if 'id' in conf_opts:
             conf_opts['id'] = str(conf_opts['id'])
@@ -483,20 +556,11 @@ def load_config(path, env_var, default_path=None):
                     out.write(ifile.read())
 
     if os.path.isfile(path):
-        try:
-            opts = _read_conf_file(path)
-            opts['conf_file'] = path
-            return opts
-        except Exception as err:
-            import salt.log
-            msg = 'Error parsing configuration file: {0} - {1}'
-            if salt.log.is_console_configured():
-                log.warn(msg.format(path, err))
-            else:
-                print(msg.format(path, err))
-    else:
-        log.debug('Missing configuration file: {0}'.format(path))
+        opts = _read_conf_file(path)
+        opts['conf_file'] = path
+        return opts
 
+    log.debug('Missing configuration file: {0}'.format(path))
     return {}
 
 
@@ -534,15 +598,8 @@ def include_config(include, orig_path, verbose):
                 )
 
         for fn_ in sorted(glob.glob(path)):
-            try:
-                log.debug('Including configuration from {0!r}'.format(fn_))
-                configuration.update(_read_conf_file(fn_))
-            except Exception as err:
-                log.warn(
-                    'Error parsing configuration file: {0} - {1}'.format(
-                        fn_, err
-                    )
-                )
+            log.debug('Including configuration from {0!r}'.format(fn_))
+            configuration.update(_read_conf_file(fn_))
     return configuration
 
 
@@ -585,6 +642,17 @@ def minion_config(path,
         )
     if defaults is None:
         defaults = DEFAULT_MINION_OPTS
+
+    if not os.environ.get(env_var, None):
+        # No valid setting was given using the configuration variable.
+        # Lets see is SALT_CONFIG_DIR is of any use
+        salt_config_dir = os.environ.get('SALT_CONFIG_DIR', None)
+        if salt_config_dir:
+            env_config_file_path = os.path.join(salt_config_dir, 'minion')
+            if salt_config_dir and os.path.isfile(env_config_file_path):
+                # We can get a configuration file using SALT_CONFIG_DIR, let's
+                # update the environment with this information
+                os.environ[env_var] = env_config_file_path
 
     overrides = load_config(path, env_var, DEFAULT_MINION_OPTS['conf_file'])
     default_include = overrides.get('default_include',
@@ -665,7 +733,796 @@ def syndic_config(master_config_path,
     return opts
 
 
-def get_id(root_dir=None):
+# ----- Salt Cloud Configuration Functions ---------------------------------->
+def cloud_config(path, env_var='SALT_CLOUD_CONFIG', defaults=None,
+                 master_config_path=None, master_config=None,
+                 providers_config_path=None, providers_config=None,
+                 vm_config_path=None, vm_config=None):
+    '''
+    Read in the salt cloud config and return the dict
+    '''
+    # Load the cloud configuration
+    try:
+        overrides = salt.config.load_config(path, env_var, '/etc/salt/cloud')
+    except TypeError:
+        log.warning(
+            'Salt version is lower than 0.16.0, as such, loading '
+            'configuration from the {0!r} environment variable will '
+            'fail'.format(env_var)
+        )
+        overrides = salt.config.load_config(path, env_var)
+
+    if defaults is None:
+        defaults = CLOUD_CONFIG_DEFAULTS
+
+    # Load cloud configuration from any default or provided includes
+    default_include = overrides.get(
+        'default_include', defaults['default_include']
+    )
+    overrides.update(
+        salt.config.include_config(default_include, path, verbose=False)
+    )
+    include = overrides.get('include', [])
+    overrides.update(
+        salt.config.include_config(include, path, verbose=True)
+    )
+
+    # Prepare the deploy scripts search path
+    deploy_scripts_search_path = overrides.get(
+        'deploy_scripts_search_path',
+        defaults.get('deploy_scripts_search_path', 'cloud.deploy.d')
+    )
+    if isinstance(deploy_scripts_search_path, basestring):
+        deploy_scripts_search_path = [deploy_scripts_search_path]
+
+    # Check the provided deploy scripts search path removing any non existing
+    # entries.
+    for idx, entry in enumerate(deploy_scripts_search_path[:]):
+        if not os.path.isabs(entry):
+            # Let's try if adding the provided path's directory name turns the
+            # entry into a proper directory
+            entry = os.path.join(os.path.dirname(path), entry)
+
+        if os.path.isdir(entry):
+            # Path exists, let's update the entry(it's path might have been
+            # made absolute)
+            deploy_scripts_search_path[idx] = entry
+            continue
+
+        # It's not a directory? Remove it from the search path
+        deploy_scripts_search_path.pop(idx)
+
+    # Add the provided scripts directory to the search path
+    deploy_scripts_search_path.append(
+        os.path.abspath(os.path.join(os.path.dirname(__file__), 'deploy'))
+    )
+
+    # Let's make the search path a tuple and add it to the overrides.
+    overrides.update(
+        deploy_scripts_search_path=tuple(deploy_scripts_search_path)
+    )
+
+    # Grab data from the 4 sources
+    # 1st - Master config
+    if master_config_path is not None and master_config is not None:
+        raise salt.cloud.exceptions.SaltCloudConfigError(
+            'Only pass `master_config` or `master_config_path`, not both.'
+        )
+    elif master_config_path is None and master_config is None:
+        master_config = salt.config.master_config(
+            overrides.get(
+                # use the value from the cloud config file
+                'master_config',
+                # if not found, use the default path
+                '/etc/salt/master'
+            )
+        )
+    elif master_config_path is not None and master_config is None:
+        master_config = salt.config.master_config(master_config_path)
+
+    # 2nd - salt-cloud configuration which was loaded before so we could
+    # extract the master configuration file if needed.
+
+    # Override master configuration with the salt cloud(current overrides)
+    master_config.update(overrides)
+    # We now set the overridden master_config as the overrides
+    overrides = master_config
+
+    if providers_config_path is not None and providers_config is not None:
+        raise salt.cloud.exceptions.SaltCloudConfigError(
+            'Only pass `providers_config` or `providers_config_path`, '
+            'not both.'
+        )
+    elif providers_config_path is None and providers_config is None:
+        providers_config_path = overrides.get(
+            # use the value from the cloud config file
+            'providers_config',
+            # if not found, use the default path
+            '/etc/salt/cloud.providers'
+        )
+
+    if vm_config_path is not None and vm_config is not None:
+        raise salt.cloud.exceptions.SaltCloudConfigError(
+            'Only pass `vm_config` or `vm_config_path`, not both.'
+        )
+    elif vm_config_path is None and vm_config is None:
+        vm_config_path = overrides.get(
+            # use the value from the cloud config file
+            'vm_config',
+            # if not found, use the default path
+            '/etc/salt/cloud.profiles'
+        )
+
+    # Apply the salt-cloud configuration
+    opts = apply_cloud_config(overrides, defaults)
+
+    # 3rd - Include Cloud Providers
+    if 'providers' in opts:
+        if providers_config is not None:
+            raise salt.cloud.exceptions.SaltCloudConfigError(
+                'Do not mix the old cloud providers configuration with '
+                'the passing a pre-configured providers configuration '
+                'dictionary.'
+            )
+
+        if providers_config_path is not None:
+            providers_confd = os.path.join(
+                os.path.dirname(providers_config_path),
+                'cloud.providers.d', '*'
+            )
+
+            if os.path.isfile(providers_config_path) or \
+                    glob.glob(providers_confd):
+                raise salt.cloud.exceptions.SaltCloudConfigError(
+                    'Do not mix the old cloud providers configuration with '
+                    'the new one. The providers configuration should now go '
+                    'in the file `/etc/salt/cloud.providers` or a separate '
+                    '`*.conf` file within `cloud.providers.d/` which is '
+                    'relative to `/etc/salt/cloud.providers`.'
+                )
+        # No exception was raised? It's the old configuration alone
+        providers_config = opts['providers']
+
+    elif providers_config_path is not None:
+        # Load from configuration file, even if that files does not exist since
+        # it will be populated with defaults.
+        providers_config = cloud_providers_config(providers_config_path)
+
+    # Let's assign back the computed providers configuration
+    opts['providers'] = providers_config
+
+    # 4th - Include VM profiles config
+    if vm_config is None:
+        # Load profiles configuration from the provided file
+        vm_config = vm_profiles_config(vm_config_path, providers_config)
+    opts['profiles'] = vm_config
+
+    # Return the final options
+    return opts
+
+
+def apply_cloud_config(overrides, defaults=None):
+    if defaults is None:
+        defaults = CLOUD_CONFIG_DEFAULTS
+
+    config = defaults.copy()
+    if overrides:
+        config.update(overrides)
+
+    # If the user defined providers in salt cloud's main configuration file, we
+    # need to take care for proper and expected format.
+    if 'providers' in config:
+        # Keep a copy of the defined providers
+        providers = config['providers'].copy()
+        # Reset the providers dictionary
+        config['providers'] = {}
+        # Populate the providers dictionary
+        for alias, details in providers.items():
+            if isinstance(details, list):
+                for detail in details:
+                    if 'provider' not in detail:
+                        raise salt.cloud.exceptions.SaltCloudConfigError(
+                            'The cloud provider alias {0!r} has an entry '
+                            'missing the required setting \'provider\''.format(
+                                alias
+                            )
+                        )
+
+                    driver = detail['provider']
+                    if ':' in driver:
+                        # Weird, but...
+                        alias, driver = driver.split(':')
+
+                    if alias not in config['providers']:
+                        config['providers'][alias] = {}
+
+                    detail['provider'] = '{0}:{1}'.format(alias, driver)
+                    config['providers'][alias][driver] = detail
+            elif isinstance(details, dict):
+                if 'provider' not in details:
+                    raise salt.cloud.exceptions.SaltCloudConfigError(
+                        'The cloud provider alias {0!r} has an entry '
+                        'missing the required setting \'provider\''.format(
+                            alias
+                        )
+                    )
+                driver = details['provider']
+                if ':' in driver:
+                    # Weird, but...
+                    alias, driver = driver.split(':')
+                if alias not in config['providers']:
+                    config['providers'][alias] = {}
+
+                details['provider'] = '{0}:{1}'.format(alias, driver)
+                config['providers'][alias][driver] = details
+
+    # Migrate old configuration
+    config = old_to_new(config)
+
+    return config
+
+
+def old_to_new(opts):
+    providers = (
+        'AWS',
+        'CLOUDSTACK',
+        'DIGITAL_OCEAN',
+        'EC2',
+        'GOGRID',
+        'IBMSCE',
+        'JOYENT',
+        'LINODE',
+        'OPENSTACK',
+        'PARALLELS'
+        'RACKSPACE',
+        'SALTIFY'
+    )
+
+    for provider in providers:
+
+        provider_config = {}
+        for opt in opts.keys():
+            if not opt.startswith(provider):
+                continue
+            value = opts.pop(opt)
+            name = opt.split('.', 1)[1]
+            provider_config[name] = value
+
+        lprovider = provider.lower()
+        if provider_config:
+            provider_config['provider'] = lprovider
+            opts.setdefault('providers', {})
+            # provider alias
+            opts['providers'][lprovider] = {}
+            # provider alias, provider driver
+            opts['providers'][lprovider][lprovider] = provider_config
+    return opts
+
+
+def vm_profiles_config(path,
+                       providers,
+                       env_var='SALT_CLOUDVM_CONFIG',
+                       defaults=None):
+    '''
+    Read in the salt cloud VM config file
+    '''
+    if defaults is None:
+        defaults = VM_CONFIG_DEFAULTS
+
+    try:
+        overrides = salt.config.load_config(
+            path, env_var, '/etc/salt/cloud.profiles'
+        )
+    except TypeError:
+        log.warning(
+            'Salt version is lower than 0.16.0, as such, loading '
+            'configuration from the {0!r} environment variable will '
+            'fail'.format(env_var)
+        )
+        overrides = salt.config.load_config(path, env_var)
+
+    default_include = overrides.get(
+        'default_include', defaults['default_include']
+    )
+    include = overrides.get('include', [])
+
+    overrides.update(
+        salt.config.include_config(default_include, path, verbose=False)
+    )
+    overrides.update(
+        salt.config.include_config(include, path, verbose=True)
+    )
+    return apply_vm_profiles_config(providers, overrides, defaults)
+
+
+def apply_vm_profiles_config(providers, overrides, defaults=None):
+    if defaults is None:
+        defaults = VM_CONFIG_DEFAULTS
+
+    config = defaults.copy()
+    if overrides:
+        config.update(overrides)
+
+    vms = {}
+
+    for key, val in config.items():
+        if key in ('conf_file', 'include', 'default_include'):
+            continue
+        if not isinstance(val, dict):
+            raise salt.cloud.exceptions.SaltCloudConfigError(
+                'The VM profiles configuration found in {0[conf_file]!r} is '
+                'not in the proper format'.format(config)
+            )
+        val['profile'] = key
+        vms[key] = val
+
+    # Is any VM profile extending data!?
+    for profile, details in vms.copy().items():
+        if 'extends' not in details:
+            if ':' in details['provider']:
+                alias, driver = details['provider'].split(':')
+                if alias not in providers or driver not in providers[alias]:
+                    log.warning(
+                        'The profile {0!r} is defining {1[provider]!r} as the '
+                        'provider. Since there\'s no valid configuration for '
+                        'that provider, the profile will be removed from the '
+                        'available listing'.format(profile, details)
+                    )
+                    vms.pop(profile)
+                    continue
+
+                if 'profiles' not in providers[alias][driver]:
+                    providers[alias][driver]['profiles'] = {}
+                providers[alias][driver]['profiles'][profile] = details
+
+            if details['provider'] not in providers:
+                log.warning(
+                    'The profile {0!r} is defining {1[provider]!r} as the '
+                    'provider. Since there\'s no valid configuration for '
+                    'that provider, the profile will be removed from the '
+                    'available listing'.format(profile, details)
+                )
+                vms.pop(profile)
+                continue
+
+            driver = providers[details['provider']].keys()[0]
+            providers[details['provider']][driver].setdefault(
+                'profiles', {}).update({profile: details})
+            details['provider'] = '{0[provider]}:{1}'.format(details, driver)
+            vms[profile] = details
+
+            continue
+
+        extends = details.pop('extends')
+        if extends not in vms:
+            log.error(
+                'The {0!r} profile is trying to extend data from {1!r} '
+                'though {1!r} is not defined in the salt profiles loaded '
+                'data. Not extending and removing from listing!'.format(
+                    profile, extends
+                )
+            )
+            vms.pop(profile)
+            continue
+
+        extended = vms.get(extends).copy()
+        extended.pop('profile')
+        extended.update(details)
+
+        if ':' not in extended['provider']:
+            if extended['provider'] not in providers:
+                log.warning(
+                    'The profile {0!r} is defining {1[provider]!r} as the '
+                    'provider. Since there\'s no valid configuration for '
+                    'that provider, the profile will be removed from the '
+                    'available listing'.format(profile, extended)
+                )
+                vms.pop(profile)
+                continue
+
+            driver = providers[extended['provider']].keys()[0]
+            providers[extended['provider']][driver].setdefault(
+                'profiles', {}).update({profile: extended})
+
+            extended['provider'] = '{0[provider]}:{1}'.format(extended, driver)
+        else:
+            alias, driver = extended['provider'].split(':')
+            if alias not in providers or driver not in providers[alias]:
+                log.warning(
+                    'The profile {0!r} is defining {1[provider]!r} as the '
+                    'provider. Since there\'s no valid configuration for '
+                    'that provider, the profile will be removed from the '
+                    'available listing'.format(profile, extended)
+                )
+                vms.pop(profile)
+                continue
+
+            providers[alias][driver].setdefault('profiles', {}).update(
+                {profile: extended}
+            )
+
+        # Update the profile's entry with the extended data
+        vms[profile] = extended
+
+    return vms
+
+
+def cloud_providers_config(path,
+                           env_var='SALT_CLOUD_PROVIDERS_CONFIG',
+                           defaults=None):
+    '''
+    Read in the salt cloud providers configuration file
+    '''
+    if defaults is None:
+        defaults = PROVIDER_CONFIG_DEFAULTS
+
+    try:
+        overrides = salt.config.load_config(
+            path, env_var, '/etc/salt/cloud.providers'
+        )
+    except TypeError:
+        log.warning(
+            'Salt version is lower than 0.16.0, as such, loading '
+            'configuration from the {0!r} environment variable will '
+            'fail'.format(env_var)
+        )
+        overrides = salt.config.load_config(path, env_var)
+
+    default_include = overrides.get(
+        'default_include', defaults['default_include']
+    )
+    include = overrides.get('include', [])
+
+    overrides.update(
+        salt.config.include_config(default_include, path, verbose=False)
+    )
+    overrides.update(
+        salt.config.include_config(include, path, verbose=True)
+    )
+    return apply_cloud_providers_config(overrides, defaults)
+
+
+def apply_cloud_providers_config(overrides, defaults=None):
+    '''
+    Apply the loaded cloud providers configuration.
+    '''
+    if defaults is None:
+        defaults = PROVIDER_CONFIG_DEFAULTS
+
+    config = defaults.copy()
+    if overrides:
+        config.update(overrides)
+
+    # Is the user still using the old format in the new configuration file?!
+    for name, settings in config.copy().items():
+        if '.' in name:
+            log.warn(
+                'Please switch to the new providers configuration syntax'
+            )
+
+            # Let's help out and migrate the data
+            config = old_to_new(config)
+
+            # old_to_new will migrate the old data into the 'providers' key of
+            # the config dictionary. Let's map it correctly
+            for prov_name, prov_settings in config.pop('providers').items():
+                config[prov_name] = prov_settings
+            break
+
+    providers = {}
+    for key, val in config.items():
+        if key in ('conf_file', 'include', 'default_include'):
+            continue
+
+        if not isinstance(val, (list, tuple)):
+            val = [val]
+        else:
+            # Need to check for duplicate cloud provider entries per "alias" or
+            # we won't be able to properly reference it.
+            handled_providers = set()
+            for details in val:
+                if 'provider' not in details:
+                    if 'extends' not in details:
+                        log.error(
+                            'Please check your cloud providers configuration. '
+                            'There\'s no \'provider\' nor \'extends\' '
+                            'definition. So it\'s pretty useless.'
+                        )
+                    continue
+                if details['provider'] in handled_providers:
+                    log.error(
+                        'You can only have one entry per cloud provider. For '
+                        'example, if you have a cloud provider configuration '
+                        'section named, \'production\', you can only have a '
+                        'single entry for EC2, Joyent, Openstack, and so '
+                        'forth.'
+                    )
+                    raise salt.cloud.exceptions.SaltCloudConfigError(
+                        'The cloud provider alias {0!r} has multiple entries '
+                        'for the {1[provider]!r} driver.'.format(key, details)
+                    )
+                handled_providers.add(details['provider'])
+
+        for entry in val:
+            if 'provider' not in entry:
+                entry['provider'] = '-only-extendable-'
+
+            if key not in providers:
+                providers[key] = {}
+
+            provider = entry['provider']
+            if provider in providers[key] and provider == '-only-extendable-':
+                raise salt.cloud.exceptions.SaltCloudConfigError(
+                    'There\'s multiple entries under {0!r} which do not set '
+                    'a provider setting. This is most likely just a holder '
+                    'for data to be extended from, however, there can be '
+                    'only one entry which does not define it\'s \'provider\' '
+                    'setting.'.format(key)
+                )
+            elif provider not in providers[key]:
+                providers[key][provider] = entry
+
+    # Is any provider extending data!?
+    while True:
+        keep_looping = False
+        for provider_alias, entries in providers.copy().items():
+
+            for driver, details in entries.iteritems():
+                # Set a holder for the defined profiles
+                providers[provider_alias][driver]['profiles'] = {}
+
+                if 'extends' not in details:
+                    continue
+
+                extends = details.pop('extends')
+
+                if ':' in extends:
+                    alias, provider = extends.split(':')
+                    if alias not in providers:
+                        raise salt.cloud.exceptions.SaltCloudConfigError(
+                            'The {0!r} cloud provider entry in {1!r} is '
+                            'trying to extend data from {2!r} though {2!r} '
+                            'is not defined in the salt cloud providers '
+                            'loaded data.'.format(
+                                details['provider'],
+                                provider_alias,
+                                alias
+                            )
+                        )
+
+                    if provider not in providers.get(alias):
+                        raise salt.cloud.exceptions.SaltCloudConfigError(
+                            'The {0!r} cloud provider entry in {1!r} is '
+                            'trying to extend data from \'{2}:{3}\' though '
+                            '{3!r} is not defined in {1!r}'.format(
+                                details['provider'],
+                                provider_alias,
+                                alias,
+                                provider
+                            )
+                        )
+                    details['extends'] = '{0}:{1}'.format(alias, provider)
+                elif providers.get(extends) and len(providers[extends]) > 1:
+                    raise salt.cloud.exceptions.SaltCloudConfigError(
+                        'The {0!r} cloud provider entry in {1!r} is trying '
+                        'to extend from {2!r} which has multiple entries '
+                        'and no provider is being specified. Not '
+                        'extending!'.format(
+                            details['provider'], provider_alias, extends
+                        )
+                    )
+                elif extends not in providers:
+                    raise salt.cloud.exceptions.SaltCloudConfigError(
+                        'The {0!r} cloud provider entry in {1!r} is trying '
+                        'to extend data from {2!r} though {2!r} is not '
+                        'defined in the salt cloud providers loaded '
+                        'data.'.format(
+                            details['provider'], provider_alias, extends
+                        )
+                    )
+                else:
+                    provider = providers.get(extends)
+                    if driver in providers.get(extends):
+                        details['extends'] = '{0}:{1}'.format(extends, driver)
+                    elif '-only-extendable-' in providers.get(extends):
+                        details['extends'] = '{0}:{1}'.format(
+                            extends, '-only-extendable-'
+                        )
+                    else:
+                        # We're still not aware of what we're trying to extend
+                        # from. Let's try on next iteration
+                        details['extends'] = extends
+                        keep_looping = True
+        if not keep_looping:
+            break
+
+    while True:
+        # Merge provided extends
+        keep_looping = False
+        for alias, entries in providers.copy().items():
+            for driver, details in entries.iteritems():
+
+                if 'extends' not in details:
+                    # Extends resolved or non existing, continue!
+                    continue
+
+                if 'extends' in details['extends']:
+                    # Since there's a nested extends, resolve this one in the
+                    # next iteration
+                    keep_looping = True
+                    continue
+
+                # Let's get a reference to what we're supposed to extend
+                extends = details.pop('extends')
+                # Split the setting in (alias, driver)
+                ext_alias, ext_driver = extends.split(':')
+                # Grab a copy of what should be extended
+                extended = providers.get(ext_alias).get(ext_driver).copy()
+                # Merge the data to extend with the details
+                extended.update(details)
+                # Update the providers dictionary with the merged data
+                providers[alias][driver] = extended
+
+        if not keep_looping:
+            break
+
+    # Now clean up any providers entry that was just used to be a data tree to
+    # extend from
+    for provider_alias, entries in providers.copy().items():
+        for driver, details in entries.copy().iteritems():
+            if driver != '-only-extendable-':
+                continue
+
+            log.info(
+                'There\'s at least one cloud driver details under the {0!r} '
+                'cloud provider alias which does not have the required '
+                '\'provider\' setting. Was probably just used as a holder '
+                'for additional data. Removing it from the available '
+                'providers listing'.format(
+                    provider_alias
+                )
+            )
+            providers[provider_alias].pop(driver)
+
+        if not providers[provider_alias]:
+            providers.pop(provider_alias)
+
+    return providers
+
+
+def get_cloud_config_value(name, vm_, opts, default=None, search_global=True):
+    '''
+    Search and return a setting in a known order:
+
+        1. In the virtual machine's configuration
+        2. In the virtual machine's profile configuration
+        3. In the virtual machine's provider configuration
+        4. In the salt cloud configuration if global searching is enabled
+        5. Return the provided default
+    '''
+
+    # As a last resort, return the default
+    value = default
+
+    if search_global is True and opts.get(name, None) is not None:
+        # The setting name exists in the cloud(global) configuration
+        value = deepcopy(opts[name])
+
+    if vm_ and name:
+        # Let's get the value from the profile, if present
+        if 'profile' in vm_ and name in opts['profiles'][vm_['profile']]:
+            if isinstance(value, dict):
+                value.update(opts['profiles'][vm_['profile']][name].copy())
+            else:
+                value = deepcopy(opts['profiles'][vm_['profile']][name])
+
+        # Let's get the value from the provider, if present
+        if ':' in vm_['provider']:
+            # The provider is defined as <provider-alias>:<provider-name>
+            alias, driver = vm_['provider'].split(':')
+            if alias in opts['providers'] and \
+                    driver in opts['providers'][alias]:
+                details = opts['providers'][alias][driver]
+                if name in details:
+                    if isinstance(value, dict):
+                        value.update(details[name].copy())
+                    else:
+                        value = deepcopy(details[name])
+        elif len(opts['providers'].get(vm_['provider'], ())) > 1:
+            # The provider is NOT defined as <provider-alias>:<provider-name>
+            # and there's more than one entry under the alias.
+            # WARN the user!!!!
+            log.error(
+                'The {0!r} cloud provider definition has more than one '
+                'entry. Your VM configuration should be specifying the '
+                'provider as \'provider: {0}:<provider-engine>\'. Since '
+                'it\'s not, we\'re returning the first definition which '
+                'might not be what you intended.'.format(
+                    vm_['provider']
+                )
+            )
+
+        if vm_['provider'] in opts['providers']:
+            # There's only one driver defined for this provider. This is safe.
+            alias_defs = opts['providers'].get(vm_['provider'])
+            provider_driver_defs = alias_defs[alias_defs.keys()[0]]
+            if name in provider_driver_defs:
+                # The setting name exists in the VM's provider configuration.
+                # Return it!
+                if isinstance(value, dict):
+                    value.update(provider_driver_defs[name].copy())
+                else:
+                    value = deepcopy(provider_driver_defs[name])
+
+    if name and vm_ and name in vm_:
+        # The setting name exists in VM configuration.
+        if isinstance(value, dict):
+            value.update(vm_[name].copy())
+        else:
+            value = deepcopy(vm_[name])
+
+    return value
+
+
+def is_provider_configured(opts, provider, required_keys=()):
+    '''
+    Check and return the first matching and fully configured cloud provider
+    configuration.
+    '''
+    if ':' in provider:
+        alias, driver = provider.split(':')
+        if alias not in opts['providers']:
+            return False
+        if driver not in opts['providers'][alias]:
+            return False
+        for key in required_keys:
+            if opts['providers'][alias][driver].get(key, None) is None:
+                # There's at least one require configuration key which is not
+                # set.
+                log.warn(
+                    'The required {0!r} configuration setting is missing on '
+                    'the {1!r} driver(under the {2!r} alias)'.format(
+                        key, provider, alias
+                    )
+                )
+                return False
+        # If we reached this far, there's a properly configured provider,
+        # return it!
+        return opts['providers'][alias][driver]
+
+    for alias, drivers in opts['providers'].iteritems():
+        for driver, provider_details in drivers.iteritems():
+            if driver != provider:
+                continue
+
+            # If we reached this far, we have a matching provider, let's see if
+            # all required configuration keys are present and not None
+            skip_provider = False
+            for key in required_keys:
+                if provider_details.get(key, None) is None:
+                    # This provider does not include all necessary keys,
+                    # continue to next one
+                    log.warn(
+                        'The required {0!r} configuration setting is missing '
+                        'on the {1!r} driver(under the {2!r} alias)'.format(
+                            key, provider, alias
+                        )
+                    )
+                    skip_provider = True
+                    break
+
+            if skip_provider:
+                continue
+
+            # If we reached this far, the provider included all required keys
+            return provider_details
+
+    # If we reached this point, the provider is not configured.
+    return False
+# <---- Salt Cloud Configuration Functions -----------------------------------
+
+
+def get_id(root_dir=None, minion_id=False, cache=True):
     '''
     Guess the id of the minion.
 
@@ -685,18 +1542,24 @@ def get_id(root_dir=None):
     if root_dir is None:
         root_dir = syspaths.ROOT_DIR
 
+    config_dir = syspaths.CONFIG_DIR
+    if config_dir.startswith(syspaths.ROOT_DIR):
+        config_dir = config_dir.split(syspaths.ROOT_DIR, 1)[-1]
+
     # Check for cached minion ID
     id_cache = os.path.join(root_dir,
-                            syspaths.CONFIG_DIR.lstrip(syspaths.ROOT_DIR),
+                            config_dir.lstrip('\\'),
                             'minion_id')
-    try:
-        with salt.utils.fopen(id_cache) as idf:
-            name = idf.read().strip()
-        if name:
-            log.info('Using cached minion ID: {0}'.format(name))
-            return name, False
-    except (IOError, OSError):
-        pass
+
+    if cache:
+        try:
+            with salt.utils.fopen(id_cache) as idf:
+                name = idf.read().strip()
+            if name:
+                log.info('Using cached minion ID: {0}'.format(name))
+                return name, False
+        except (IOError, OSError):
+            pass
 
     log.debug('Guessing ID. The id can be explicitly in set {0}'
               .format(os.path.join(syspaths.CONFIG_DIR, 'minion')))
@@ -705,11 +1568,12 @@ def get_id(root_dir=None):
     fqdn = socket.getfqdn()
     if fqdn != 'localhost':
         log.info('Found minion id from getfqdn(): {0}'.format(fqdn))
-        try:
-            with salt.utils.fopen(id_cache, 'w') as idf:
-                idf.write(fqdn)
-        except (IOError, OSError) as exc:
-            log.error('Could not cache minion ID: {0}'.format(exc))
+        if minion_id and cache:
+            try:
+                with salt.utils.fopen(id_cache, 'w') as idf:
+                    idf.write(fqdn)
+            except (IOError, OSError) as exc:
+                log.error('Could not cache minion ID: {0}'.format(exc))
         return fqdn, False
 
     # Check /etc/hostname
@@ -721,11 +1585,12 @@ def get_id(root_dir=None):
                         'This file should not contain any whitespace.')
         else:
             if name != 'localhost':
-                try:
-                    with salt.utils.fopen(id_cache, 'w') as idf:
-                        idf.write(name)
-                except (IOError, OSError) as exc:
-                    log.error('Could not cache minion ID: {0}'.format(exc))
+                if minion_id and cache:
+                    try:
+                        with salt.utils.fopen(id_cache, 'w') as idf:
+                            idf.write(name)
+                    except (IOError, OSError) as exc:
+                        log.error('Could not cache minion ID: {0}'.format(exc))
                 return name, False
     except (IOError, OSError):
         pass
@@ -741,19 +1606,20 @@ def get_id(root_dir=None):
                         if name != 'localhost':
                             log.info('Found minion id in hosts file: {0}'
                                      .format(name))
-                            try:
-                                with salt.utils.fopen(id_cache, 'w') as idf:
-                                    idf.write(name)
-                            except (IOError, OSError) as exc:
-                                log.error('Could not cache minion ID: {0}'
-                                          .format(exc))
+                            if minion_id and cache:
+                                try:
+                                    with salt.utils.fopen(id_cache, 'w') as idf:
+                                        idf.write(name)
+                                except (IOError, OSError) as exc:
+                                    log.error('Could not cache minion ID: {0}'
+                                              .format(exc))
                             return name, False
     except (IOError, OSError):
         pass
 
     # Can Windows 'hosts' file help?
     try:
-        windir = os.getenv("WINDIR")
+        windir = os.getenv('WINDIR')
         with salt.utils.fopen(windir + r'\system32\drivers\etc\hosts') as hfl:
             for line in hfl:
                 # skip commented or blank lines
@@ -767,12 +1633,13 @@ def get_id(root_dir=None):
                             if name != 'localhost':
                                 log.info('Found minion id in hosts file: {0}'
                                          .format(name))
-                                try:
-                                    with salt.utils.fopen(id_cache, 'w') as idf:
-                                        idf.write(name)
-                                except (IOError, OSError) as exc:
-                                    log.error('Could not cache minion ID: {0}'
-                                              .format(exc))
+                                if minion_id and cache:
+                                    try:
+                                        with salt.utils.fopen(id_cache, 'w') as idf:
+                                            idf.write(name)
+                                    except (IOError, OSError) as exc:
+                                        log.error('Could not cache minion ID: {0}'
+                                                  .format(exc))
                                 return name, False
                 except IndexError:
                     pass  # could not split line (malformed entry?)
@@ -831,8 +1698,11 @@ def apply_minion_config(overrides=None,
 
     # No ID provided. Will getfqdn save us?
     using_ip_for_id = False
-    if opts['id'] is None and minion_id:
-        opts['id'], using_ip_for_id = get_id(opts['root_dir'])
+    if opts['id'] is None:
+        opts['id'], using_ip_for_id = get_id(
+                opts['root_dir'],
+                minion_id=minion_id,
+                cache=opts.get('minion_id_caching', True))
 
     # it does not make sense to append a domain to an IP based id
     if not using_ip_for_id and 'append_domain' in opts:
@@ -866,7 +1736,9 @@ def apply_minion_config(overrides=None,
             '__mine_interval':
             {
                 'function': 'mine.update',
-                'minutes': opts['mine_interval']
+                'minutes': opts['mine_interval'],
+                'jid_include': True,
+                'maxrunning': 2
             }
         })
     return opts
@@ -878,6 +1750,17 @@ def master_config(path, env_var='SALT_MASTER_CONFIG', defaults=None):
     '''
     if defaults is None:
         defaults = DEFAULT_MASTER_OPTS
+
+    if not os.environ.get(env_var, None):
+        # No valid setting was given using the configuration variable.
+        # Lets see is SALT_CONFIG_DIR is of any use
+        salt_config_dir = os.environ.get('SALT_CONFIG_DIR', None)
+        if salt_config_dir:
+            env_config_file_path = os.path.join(salt_config_dir, 'master')
+            if salt_config_dir and os.path.isfile(env_config_file_path):
+                # We can get a configuration file using SALT_CONFIG_DIR, let's
+                # update the environment with this information
+                os.environ[env_var] = env_config_file_path
 
     overrides = load_config(path, env_var, DEFAULT_MASTER_OPTS['conf_file'])
     default_include = overrides.get('default_include',

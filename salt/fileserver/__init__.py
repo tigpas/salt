@@ -20,7 +20,7 @@ def generate_mtime_map(path_map):
     Generate a dict of filename -> mtime
     '''
     file_map = {}
-    for env, path_list in path_map.iteritems():
+    for saltenv, path_list in path_map.iteritems():
         for path in path_list:
             for directory, dirnames, filenames in os.walk(path):
                 for item in filenames:
@@ -52,10 +52,10 @@ def reap_fileserver_cache_dir(cache_base, find_func):
     '''
     Remove unused cache items assuming the cache directory follows a directory convention:
 
-    cache_base -> env -> relpath
+    cache_base -> saltenv -> relpath
     '''
-    for env in os.listdir(cache_base):
-        env_base = os.path.join(cache_base, env)
+    for saltenv in os.listdir(cache_base):
+        env_base = os.path.join(cache_base, saltenv)
         for root, dirs, files in os.walk(env_base):
             # if we have an empty directory, lets cleanup
             # This will only remove the directory on the second time "_reap_cache" is called (which is intentional)
@@ -66,9 +66,13 @@ def reap_fileserver_cache_dir(cache_base, find_func):
             for file_ in files:
                 file_path = os.path.join(root, file_)
                 file_rel_path = os.path.relpath(file_path, env_base)
-                filename, _, hash_type = file_rel_path.rsplit('.', 2)
+                try:
+                    filename, _, hash_type = file_rel_path.rsplit('.', 2)
+                except ValueError:
+                    log.warn('Found invalid hash file [{0}] when attempting to reap cache directory.'.format(file_))
+                    continue
                 # do we have the file?
-                ret = find_func(filename, env=env)
+                ret = find_func(filename, saltenv=saltenv)
                 # if we don't actually have the file, lets clean up the cache object
                 if ret['path'] == '':
                     os.unlink(file_path)
@@ -128,18 +132,19 @@ class Fileserver(object):
 
     def update(self, back=None):
         '''
-        Update all of the fileservers that support the update function or the
+        Update all of the file-servers that support the update function or the
         named fileserver only.
         '''
         back = self._gen_back(back)
         for fsb in back:
             fstr = '{0}.update'.format(fsb)
             if fstr in self.servers:
+                log.debug('Updating fileserver cache')
                 self.servers[fstr]()
 
     def envs(self, back=None, sources=False):
         '''
-        Return the environments for the named backend or all backends
+        Return the environments for the named backend or all back-ends
         '''
         back = self._gen_back(back)
         ret = set()
@@ -165,7 +170,7 @@ class Fileserver(object):
             if fstr in self.servers:
                 self.servers[fstr]()
 
-    def find_file(self, path, env, back=None):
+    def find_file(self, path, saltenv, back=None):
         '''
         Find the path and return the fnd structure, this structure is passed
         to other backend interfaces.
@@ -193,11 +198,19 @@ class Fileserver(object):
                     args = comp.split('=', 1)
                     kwargs[args[0]] = args[1]
         if 'env' in kwargs:
-            env = kwargs.pop('env')
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            saltenv = kwargs.pop('env')
+        elif 'saltenv' in kwargs:
+            saltenv = kwargs.pop('saltenv')
         for fsb in back:
             fstr = '{0}.find_file'.format(fsb)
             if fstr in self.servers:
-                fnd = self.servers[fstr](path, env, **kwargs)
+                fnd = self.servers[fstr](path, saltenv, **kwargs)
                 if fnd.get('path'):
                     fnd['back'] = fsb
                     return fnd
@@ -209,9 +222,18 @@ class Fileserver(object):
         '''
         ret = {'data': '',
                'dest': ''}
-        if 'path' not in load or 'loc' not in load or 'env' not in load:
+        if 'env' in load:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            load['saltenv'] = load.pop('env')
+
+        if 'path' not in load or 'loc' not in load or 'saltenv' not in load:
             return ret
-        fnd = self.find_file(load['path'], load['env'])
+        fnd = self.find_file(load['path'], load['saltenv'])
         if not fnd.get('back'):
             return ret
         fstr = '{0}.serve_file'.format(fnd['back'])
@@ -223,9 +245,18 @@ class Fileserver(object):
         '''
         Return the hash of a given file
         '''
-        if 'path' not in load or 'env' not in load:
+        if 'env' in load:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            load['saltenv'] = load.pop('env')
+
+        if 'path' not in load or 'saltenv' not in load:
             return ''
-        fnd = self.find_file(load['path'], load['env'])
+        fnd = self.find_file(load['path'], load['saltenv'])
         if not fnd.get('back'):
             return ''
         fstr = '{0}.file_hash'.format(fnd['back'])
@@ -237,50 +268,102 @@ class Fileserver(object):
         '''
         Return a list of files from the dominant environment
         '''
+        if 'env' in load:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            load['saltenv'] = load.pop('env')
+
         ret = set()
-        if 'env' not in load:
+        if 'saltenv' not in load:
             return []
         for fsb in self._gen_back(None):
             fstr = '{0}.file_list'.format(fsb)
             if fstr in self.servers:
                 ret.update(self.servers[fstr](load))
+        # some *fs do not handle prefix. Ensure it is filtered
+        prefix = load.get('prefix', '').strip('/')
+        if prefix != '':
+            ret = [f for f in ret if f.startswith(prefix)]
         return sorted(ret)
 
     def file_list_emptydirs(self, load):
         '''
         List all emptydirs in the given environment
         '''
+        if 'env' in load:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            load['saltenv'] = load.pop('env')
+
         ret = set()
-        if 'env' not in load:
+        if 'saltenv' not in load:
             return []
         for fsb in self._gen_back(None):
             fstr = '{0}.file_list_emptydirs'.format(fsb)
             if fstr in self.servers:
                 ret.update(self.servers[fstr](load))
+        # some *fs do not handle prefix. Ensure it is filtered
+        prefix = load.get('prefix', '').strip('/')
+        if prefix != '':
+            ret = [f for f in ret if f.startswith(prefix)]
         return sorted(ret)
 
     def dir_list(self, load):
         '''
         List all directories in the given environment
         '''
+        if 'env' in load:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            load['saltenv'] = load.pop('env')
+
         ret = set()
-        if 'env' not in load:
+        if 'saltenv' not in load:
             return []
         for fsb in self._gen_back(None):
             fstr = '{0}.dir_list'.format(fsb)
             if fstr in self.servers:
                 ret.update(self.servers[fstr](load))
+        # some *fs do not handle prefix. Ensure it is filtered
+        prefix = load.get('prefix', '').strip('/')
+        if prefix != '':
+            ret = [f for f in ret if f.startswith(prefix)]
         return sorted(ret)
 
     def symlink_list(self, load):
         '''
         Return a list of symlinked files and dirs
         '''
+        if 'env' in load:
+            salt.utils.warn_until(
+                'Boron',
+                'Passing a salt environment should be done using \'saltenv\' '
+                'not \'env\'. This functionality will be removed in Salt '
+                'Boron.'
+            )
+            load['saltenv'] = load.pop('env')
+
         ret = {}
-        if 'env' not in load:
+        if 'saltenv' not in load:
             return {}
         for fsb in self._gen_back(None):
             symlstr = '{0}.symlink_list'.format(fsb)
             if symlstr in self.servers:
                 ret = self.servers[symlstr](load)
+        # some *fs do not handle prefix. Ensure it is filtered
+        prefix = load.get('prefix', '').strip('/')
+        if prefix != '':
+            ret = [f for f in ret if f.startswith(prefix)]
         return ret

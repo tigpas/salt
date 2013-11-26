@@ -57,8 +57,8 @@ class SaltStackVersion(object):
         'Hydrogen': (sys.maxint - 108, 0, 0, 0),
         'Helium': (sys.maxint - 107, 0, 0, 0),
         'Lithium': (sys.maxint - 106, 0, 0, 0),
-        #'Beryllium'    : (sys.maxint - 105, 0, 0, 0),
-        #'Boron'        : (sys.maxint - 104, 0, 0, 0),
+        'Beryllium': (sys.maxint - 105, 0, 0, 0),
+        'Boron': (sys.maxint - 104, 0, 0, 0),
         #'Carbon'       : (sys.maxint - 103, 0, 0, 0),
         #'Nitrogen'     : (sys.maxint - 102, 0, 0, 0),
         #'Oxygen'       : (sys.maxint - 101, 0, 0, 0),
@@ -221,7 +221,7 @@ class SaltStackVersion(object):
     def from_name(cls, name):
         if name.lower() not in cls.LNAMES:
             raise ValueError(
-                'Named version {0!r} is not know'.format(name)
+                'Named version {0!r} is not known'.format(name)
             )
         return cls(*cls.LNAMES[name.lower()])
 
@@ -358,15 +358,17 @@ def __get_version(version, version_info):
     import warnings
     import subprocess
 
-    try:
+    if 'SETUP_DIRNAME' in globals():
+        # This is from the exec() call in Salt's setup.py
+        cwd = SETUP_DIRNAME  # pylint: disable=E0602
+        if not os.path.exists(os.path.join(cwd, '.git')):
+            # This is not a Salt git checkout!!! Don't even try to parse...
+            return version, version_info
+    else:
         cwd = os.path.abspath(os.path.dirname(__file__))
-    except NameError:
-        # We're most likely being frozen and __file__ triggered this NameError
-        # Let's work around that
-        import inspect
-        cwd = os.path.abspath(
-            os.path.dirname(inspect.getsourcefile(__get_version))
-        )
+        if not os.path.exists(os.path.join(os.path.dirname(cwd), '.git')):
+            # This is not a Salt git checkout!!! Don't even try to parse...
+            return version, version_info
 
     try:
         kwargs = dict(
@@ -434,11 +436,11 @@ del __get_version
 # <---- Dynamic/Runtime Salt Version Information -----------------------------
 
 
-def versions_information():
+def versions_information(include_salt_cloud=False):
     '''
     Report on all of the versions for dependent software
     '''
-    libs = (
+    libs = [
         ('Salt', None, __version__),
         ('Python', None, sys.version.rsplit('\n')[0].strip()),
         ('Jinja2', 'jinja2', '__version__'),
@@ -449,7 +451,13 @@ def versions_information():
         ('PyYAML', 'yaml', '__version__'),
         ('PyZMQ', 'zmq', '__version__'),
         ('ZMQ', 'zmq', 'zmq_version')
-    )
+    ]
+
+    if include_salt_cloud:
+        libs.append(
+            ('Apache Libcloud', 'libcloud', '__version__'),
+        )
+
     for name, imp, attr in libs:
         if imp is None:
             yield name, attr
@@ -466,11 +474,11 @@ def versions_information():
             yield name, None
 
 
-def versions_report():
+def versions_report(include_salt_cloud=False):
     '''
     Yield each library properly formatted for a console clean output.
     '''
-    libs = list(versions_information())
+    libs = list(versions_information(include_salt_cloud=include_salt_cloud))
 
     padding = max(len(lib[0]) for lib in libs) + 1
 

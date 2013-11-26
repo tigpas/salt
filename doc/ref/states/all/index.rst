@@ -14,10 +14,13 @@ Full list of builtin state modules
     alternatives
     apt
     augeas
+    aws_sqs
     cmd
     cron
+    ddns
     debconfmod
     disk
+    dockerio
     eselect
     file
     gem
@@ -28,6 +31,7 @@ Full list of builtin state modules
     host
     iptables
     keyboard
+    keystone
     kmod
     layman
     libvirt
@@ -52,14 +56,23 @@ Full list of builtin state modules
     pkgng
     pkgrepo
     portage_config
+    ports
     postgres_database
     postgres_group
     postgres_user
+    powerpath
+    process
     quota
+    rabbitmq_cluster
+    rabbitmq_plugin
+    rabbitmq_policy
     rabbitmq_user
     rabbitmq_vhost
     rbenv
+    rdp
+    reg
     rvm
+    saltmod
     selinux
     service
     ssh_auth
@@ -74,6 +87,7 @@ Full list of builtin state modules
     virtualenv_mod
     win_dns_client
     win_firewall
+    win_network
     win_path
     win_servermanager
     win_system

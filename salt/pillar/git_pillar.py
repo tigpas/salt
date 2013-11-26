@@ -1,12 +1,44 @@
 # -*- coding: utf-8 -*-
 '''
-Clone a remote git repository and use the filesystem as a pillar directory.
+Clone a remote git repository and use the filesystem as a Pillar source
 
-This looks like:
+This external Pillar source can be configured in the master config file like
+so:
 
-ext_pillar:
-    - git: master git://gitserver/git-pillar.git
+.. code-block:: yaml
 
+    ext_pillar:
+      - git: master git://gitserver/git-pillar.git
+
+Note that this is not the same thing as configuring pillar data using the
+:conf_master:`pillar_roots` parameter. The branch referenced in the
+:conf_master:`ext_pillar` entry above (``master``), would evaluate to the
+``base`` environment, so this branch needs to contain a ``top.sls`` with a
+``base`` section in it, like this:
+
+.. code-block:: yaml
+
+    base:
+      '*':
+        - foo
+
+To use other environments from the same git repo as git_pillar sources, just
+add additional lines, like so:
+
+.. code-block:: yaml
+
+    ext_pillar:
+      - git: master git://gitserver/git-pillar.git
+      - git: dev git://gitserver/git-pillar.git
+
+In this case, the ``dev`` branch would need its own ``top.sls`` with a ``dev``
+section in it, like this:
+
+.. code-block:: yaml
+
+    dev:
+      '*':
+        - bar
 '''
 
 # Import python libs
@@ -28,6 +60,9 @@ from salt.pillar import Pillar
 # Set up logging
 log = logging.getLogger(__name__)
 
+# Define the module's virtual name
+__virtualname__ = 'git'
+
 
 def __virtual__():
     '''
@@ -42,7 +77,7 @@ def __virtual__():
         return False
     if not git.__version__ > '0.3.0':
         return False
-    return 'git'
+    return __virtualname__
 
 
 def _get_ref(repo, short):
@@ -90,16 +125,15 @@ def update(branch, repo_location):
     '''
     Ensure you are on the right branch, and execute a git pull
 
-    return boolean wether it worked
+    return boolean whether it worked
     '''
     pid = os.getpid()
     repo = init(branch, repo_location)
     try:
-        repo.git.checkout(branch)
+        repo.git.checkout("origin/" + branch)
     except git.exc.GitCommandError as e:
         logging.error('Unable to checkout branch {0}: {1}'.format(branch, e))
         return False
-    repo.git.pull()
     return True
 
 

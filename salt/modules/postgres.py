@@ -20,7 +20,7 @@ Module to provide Postgres compatibility to salt.
 
 # Import python libs
 import datetime
-import distutils.version
+import distutils.version  # pylint: disable=E0611
 import logging
 import StringIO
 import os
@@ -114,13 +114,20 @@ def version(user=None, host=None, port=None, maintenance_db=None,
 def _parsed_version(user=None, host=None, port=None, maintenance_db=None,
                     password=None, runas=None):
     '''
-    Returns the server version properly parsed and int casted for internal use
+    Returns the server version properly parsed and int casted for internal use.
+
+    If the Postgres server does not respond, None will be returned.
     '''
 
     psql_version = version(
         user, host, port, maintenance_db, password, runas
     )
-    return distutils.version.LooseVersion(psql_version)
+
+    if psql_version:
+        return distutils.version.LooseVersion(psql_version)
+    else:
+        log.warning('Attempt to parse version of Postgres server failed. Is the server responding?')
+        return None
 
 
 def _connection_defaults(user=None, host=None, port=None, maintenance_db=None,

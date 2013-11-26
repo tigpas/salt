@@ -120,48 +120,17 @@ def _parse_pkg_meta(path):
     return metaparser(path)
 
 
-def pack_pkgs(pkgs):
+def _repack_pkgs(pkgs):
     '''
-    Accepts a list of packages or package/version pairs (or a string
-    representing said list) and returns a dict of name/version pairs. For a
-    given package, if no version was specified (i.e. the value is a string and
-    not a dict, then the dict returned will use None as the value for that
-    package.
-
-    ``'["foo", {"bar": 1.2}, "baz"]'`` would become
-    ``{'foo': None, 'bar': 1.2, 'baz': None}``
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' pkg_resource.pack_pkgs '["foo", {"bar": 1.2}, "baz"]'
+    Repack packages specified using "pkgs" argument to pkg states into a single
+    dictionary
     '''
-    if isinstance(pkgs, basestring):
-        try:
-            pkgs = yaml.safe_load(pkgs)
-        except yaml.parser.ParserError as err:
-            log.error(err)
-            return {}
-    if not isinstance(pkgs, list) \
-            or [x for x in pkgs if not isinstance(x, (basestring, int,
-                                                      float, dict))]:
-        log.error('Invalid input: {0}'.format(pprint.pformat(pkgs)))
-        log.error('Input must be a list of strings/dicts')
-        return {}
-    ret = {}
-    for pkg in pkgs:
-        if isinstance(pkg, (basestring, int, float)):
-            ret[pkg] = None
-        else:
-            if len(pkg) != 1:
-                log.error('Invalid input: package name/version pairs must '
-                          'contain only one element (data passed: '
-                          '{0}).'.format(pkg))
-                return {}
-            ret.update(pkg)
-    return dict([(str(x), str(y) if y is not None else y)
-                 for x, y in ret.iteritems()])
+    return dict(
+        [
+            (str(x), str(y) if y is not None else y)
+            for x, y in salt.utils.repack_dictlist(pkgs).iteritems()
+        ]
+    )
 
 
 def pack_sources(sources):
@@ -222,7 +191,11 @@ def _verify_binary_pkg(srcinfo):
     return problems
 
 
-def parse_targets(name=None, pkgs=None, sources=None, **kwargs):
+def parse_targets(name=None,
+                  pkgs=None,
+                  sources=None,
+                  saltenv='base',
+                  **kwargs):
     '''
     Parses the input to pkg.install and returns back the package(s) to be
     installed. Returns a list of packages, as well as a string noting whether
@@ -234,6 +207,16 @@ def parse_targets(name=None, pkgs=None, sources=None, **kwargs):
 
         salt '*' pkg_resource.parse_targets
     '''
+    if '__env__' in kwargs:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'__env__\'. This functionality will be removed in Salt '
+            'Boron.'
+        )
+        # Backwards compatibility
+        saltenv = kwargs['__env__']
+
     if __grains__['os'] == 'MacOS' and sources:
         log.warning('Parameter "sources" ignored on MacOS hosts.')
 
@@ -242,7 +225,7 @@ def parse_targets(name=None, pkgs=None, sources=None, **kwargs):
         return None, None
 
     elif pkgs:
-        pkgs = pack_pkgs(pkgs)
+        pkgs = _repack_pkgs(pkgs)
         if not pkgs:
             return None, None
         else:
@@ -259,9 +242,7 @@ def parse_targets(name=None, pkgs=None, sources=None, **kwargs):
                 # Cache package from remote source (salt master, HTTP, FTP)
                 srcinfo.append((pkg_name,
                                 pkg_src,
-                               __salt__['cp.cache_file'](pkg_src,
-                                                         kwargs.get('__env__',
-                                                                    'base')),
+                               __salt__['cp.cache_file'](pkg_src, saltenv),
                                'remote'))
             else:
                 # Package file local to the minion
@@ -381,34 +362,6 @@ def stringify(pkgs):
             pkgs[key] = ','.join(pkgs[key])
     except AttributeError as e:
         log.exception(e)
-
-
-def find_changes(old=None, new=None):
-    '''
-    Compare before and after results from pkg.list_pkgs() to determine what
-    changes were made to the packages installed on the minion.
-
-    CLI Example:
-
-    .. code-block:: bash
-
-        salt '*' pkg_resource.find_changes
-    '''
-    pkgs = {}
-    for npkg in set((new or {}).keys()).union((old or {}).keys()):
-        if npkg not in old:
-            # the package is freshly installed
-            pkgs[npkg] = {'old': '',
-                          'new': new[npkg]}
-        elif npkg not in new:
-            # the package is removed
-            pkgs[npkg] = {'new': '',
-                          'old': old[npkg]}
-        elif new[npkg] != old[npkg]:
-            # the package was here before and the version has changed
-            pkgs[npkg] = {'old': old[npkg],
-                          'new': new[npkg]}
-    return pkgs
 
 
 def version_clean(version):

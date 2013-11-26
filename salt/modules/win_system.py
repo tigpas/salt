@@ -13,6 +13,9 @@ import salt.utils
 # Set up logging
 log = logging.getLogger(__name__)
 
+# Define the module's virtual name
+__virtualname__ = 'system'
+
 
 def __virtual__():
     '''
@@ -20,7 +23,7 @@ def __virtual__():
     '''
     if not salt.utils.is_windows():
         return False
-    return 'system'
+    return __virtualname__
 
 
 def halt(timeout=5):
@@ -231,7 +234,7 @@ def get_computer_desc():
 get_computer_description = get_computer_desc
 
 
-def join_domain(domain, username, passwd, ou, acct_exists=False,):
+def join_domain(domain, username, passwd, ou=None, acct_exists=False,):
     '''
     Join a computer the an Active Directory domain
 
@@ -242,14 +245,22 @@ def join_domain(domain, username, passwd, ou, acct_exists=False,):
         salt 'minion-id' system.join_domain 'mydomain.local' 'myusername' \
              'mysecretpasswd' 'OU=MyClients;OU=MyOrg;DC=myDom;DC=local'
     '''
+    # remove any escape characters
+    if isinstance(ou, str):
+        ou = ou.split('\\')
+        ou = ''.join(ou)
+
     FJoinOptions = 3
     if acct_exists:
         FJoinOptions = 1
     cmd = ('wmic /interactive:off ComputerSystem Where '
            'name="%computername%" call JoinDomainOrWorkgroup FJoinOptions={0} '
            'Name="{1}" UserName="{2}" Password="{3}" '
-           'AccountOU="{4}"'
-           ).format(FJoinOptions, domain, username, passwd, ou)
+           ).format(FJoinOptions, domain, username, passwd)
+    if ou:
+        add_ou = 'AccountOU="{4}"'.format(ou)
+        cmd = cmd + add_ou
+
     ret = __salt__['cmd.run'](cmd)
     if 'ReturnValue = 0;' in ret:
         return {'Domain': domain}

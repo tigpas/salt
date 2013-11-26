@@ -33,6 +33,9 @@ from salt.utils.event import tagify
 
 log = logging.getLogger(__name__)
 
+# Define the module's virtual name
+__virtualname__ = 'git'
+
 
 def __virtual__():
     '''
@@ -55,7 +58,7 @@ def __virtual__():
                   'GitPython version is not greater than 0.3.0, '
                   'version {0} detected'.format(git.__version__))
         return False
-    return 'git'
+    return __virtualname__
 
 
 def _get_ref(repo, short):
@@ -141,7 +144,10 @@ def init():
 
 def purge_cache():
     bp_ = os.path.join(__opts__['cachedir'], 'gitfs')
-    remove_dirs = os.listdir(bp_)
+    try:
+        remove_dirs = os.listdir(bp_)
+    except OSError:
+        remove_dirs = []
     for _, opt in enumerate(__opts__['gitfs_remotes']):
         repo_hash = hashlib.md5(opt).hexdigest()
         try:
@@ -307,9 +313,17 @@ def serve_file(load, fnd):
     '''
     Return a chunk from a file based on the data received
     '''
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
     ret = {'data': '',
            'dest': ''}
-    if 'path' not in load or 'loc' not in load or 'env' not in load:
+    if 'path' not in load or 'loc' not in load or 'saltenv' not in load:
         return ret
     if not fnd['path']:
         return ret
@@ -329,10 +343,18 @@ def file_hash(load, fnd):
     '''
     Return a file hash, the hash type is set in the master config file
     '''
-    if 'path' not in load or 'env' not in load:
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
+    if 'path' not in load or 'saltenv' not in load:
         return ''
     ret = {'hash_type': __opts__['hash_type']}
-    short = load['env']
+    short = load['saltenv']
     base_branch = __opts__['gitfs_base']
     if short == 'base':
         short = base_branch
@@ -365,15 +387,23 @@ def file_list(load):
     Return a list of all files on the file server in a specified
     environment
     '''
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
     ret = []
     base_branch = __opts__['gitfs_base']
-    if 'env' not in load:
+    if 'saltenv' not in load:
         return ret
-    if load['env'] == 'base':
-        load['env'] = base_branch
+    if load['saltenv'] == 'base':
+        load['saltenv'] = base_branch
     repos = init()
     for repo in repos:
-        ref = _get_ref(repo, load['env'])
+        ref = _get_ref(repo, load['saltenv'])
         if not ref:
             continue
         tree = ref.commit.tree
@@ -396,15 +426,23 @@ def file_list_emptydirs(load):
     '''
     Return a list of all empty directories on the master
     '''
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
     ret = []
     base_branch = __opts__['gitfs_base']
-    if 'env' not in load:
+    if 'saltenv' not in load:
         return ret
-    if load['env'] == 'base':
-        load['env'] = base_branch
+    if load['saltenv'] == 'base':
+        load['saltenv'] = base_branch
     repos = init()
     for repo in repos:
-        ref = _get_ref(repo, load['env'])
+        ref = _get_ref(repo, load['saltenv'])
         if not ref:
             continue
 
@@ -431,15 +469,23 @@ def dir_list(load):
     '''
     Return a list of all directories on the master
     '''
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
     ret = []
     base_branch = __opts__['gitfs_base']
-    if 'env' not in load:
+    if 'saltenv' not in load:
         return ret
-    if load['env'] == 'base':
-        load['env'] = base_branch
+    if load['saltenv'] == 'base':
+        load['saltenv'] = base_branch
     repos = init()
     for repo in repos:
-        ref = _get_ref(repo, load['env'])
+        ref = _get_ref(repo, load['saltenv'])
         if not ref:
             continue
 

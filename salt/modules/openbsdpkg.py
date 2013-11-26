@@ -16,15 +16,18 @@ log = logging.getLogger(__name__)
 
 __PKG_RE = re.compile('^((?:[^-]+|-(?![0-9]))+)-([0-9][^-]*)(?:-(.*))?$')
 
+# Define the module's virtual name
+__virtualname__ = 'pkg'
 
 # XXX need a way of setting PKG_PATH instead of inheriting from the environment
+
 
 def __virtual__():
     '''
     Set the virtual pkg module if the os is OpenBSD
     '''
     if __grains__['os'] == 'OpenBSD':
-        return 'pkg'
+        return __virtualname__
     return False
 
 
@@ -172,7 +175,7 @@ def install(name=None, pkgs=None, sources=None, **kwargs):
 
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def remove(name=None, pkgs=None, **kwargs):
@@ -209,7 +212,7 @@ def remove(name=None, pkgs=None, **kwargs):
     __salt__['cmd.run_all'](cmd)
     __context__.pop('pkg.list_pkgs', None)
     new = list_pkgs()
-    return __salt__['pkg_resource.find_changes'](old, new)
+    return salt.utils.compare_dicts(old, new)
 
 
 def purge(name=None, pkgs=None, **kwargs):

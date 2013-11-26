@@ -32,9 +32,13 @@ except ImportError:
 
 # Import salt libs
 import salt.utils
-
+import salt.fileserver
+from salt.utils.event import tagify
 
 log = logging.getLogger(__name__)
+
+# Define the module's virtual name
+__virtualname__ = 'hg'
 
 
 def __virtual__():
@@ -42,10 +46,16 @@ def __virtual__():
     Only load if mercurial is available
     '''
     if not isinstance(__opts__['hgfs_remotes'], list):
+        log.error('Mercurial fileserver backend is enabled in configuration '
+                  'but could not be loaded. Did you specify `hgfs_remotes` as a list? It is required.')
         return False
     if not isinstance(__opts__['hgfs_root'], str):
+        log.error('Mercurial fileserver backend is enabled in configuration '
+                  'but could not be loaded. Did you specify `hgfs_root` as a string? It is required.')
         return False
     if not isinstance(__opts__['hgfs_branch_method'], str):
+        log.error('Mercurial fileserver backend is enabled in configuration'
+                  'but could not be loaded. Did you specify `hgfs_branch_method` as a string? It is required')
         return False
     if not 'hg' in __opts__['fileserver_backend']:
         return False
@@ -53,7 +63,7 @@ def __virtual__():
         log.error('Mercurial fileserver backend is enabled in configuration '
                   'but could not be loaded, is hglib installed?')
         return False
-    return 'hg'
+    return __virtualname__
 
 
 def _get_ref(repo, name):
@@ -138,7 +148,10 @@ def init():
 
 def purge_cache():
     bp_ = os.path.join(__opts__['cachedir'], 'hgfs')
-    remove_dirs = os.listdir(bp_)
+    try:
+        remove_dirs = os.listdir(bp_)
+    except OSError:
+        remove_dirs = []
     for _, opt in enumerate(__opts__['hgfs_remotes']):
         repo_hash = hashlib.md5(opt).hexdigest()
         try:
@@ -157,20 +170,42 @@ def update():
     '''
     Execute a hg pull on all of the repos
     '''
+    # data for the fileserver event
+    data = {'changed': False,
+            'backend': 'hgfs'}
     pid = os.getpid()
-    purge_cache()
+    data['changed'] = purge_cache()
     repos = init()
     for repo in repos:
         repo.open()
         lk_fn = os.path.join(repo.root(), 'update.lk')
         with salt.utils.fopen(lk_fn, 'w+') as fp_:
             fp_.write(str(pid))
-        repo.pull()
+        curtip = repo.tip()
+        if repo.pull():
+            newtip = repo.tip()
+            if curtip[1] != newtip[1]:
+                data['changed'] = True
+        else:
+            log.warning('Failed to pull changes to repo: '
+                        '{0}'.format(repo.root()))
         repo.close()
         try:
             os.remove(lk_fn)
         except (OSError, IOError):
             pass
+
+    # if there is a change, fire an event
+    event = salt.utils.event.MasterEvent(__opts__['sock_dir'])
+    event.fire_event(data, tagify(['hgfs', 'update'], prefix='fileserver'))
+    try:
+        salt.fileserver.reap_fileserver_cache_dir(
+            os.path.join(__opts__['cachedir'], 'hgfs/hash'),
+            find_file
+        )
+    except (IOError, OSError):
+        # Hash file won't exist if no files have yet been served up
+        pass
 
 
 def envs():
@@ -287,9 +322,17 @@ def serve_file(load, fnd):
     '''
     Return a chunk from a file based on the data received
     '''
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
     ret = {'data': '',
            'dest': ''}
-    if 'path' not in load or 'loc' not in load or 'env' not in load:
+    if 'path' not in load or 'loc' not in load or 'saltenv' not in load:
         return ret
     if not fnd['path']:
         return ret
@@ -309,10 +352,18 @@ def file_hash(load, fnd):
     '''
     Return a file hash, the hash type is set in the master config file
     '''
-    if 'path' not in load or 'env' not in load:
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
+    if 'path' not in load or 'saltenv' not in load:
         return ''
     ret = {'hash_type': __opts__['hash_type']}
-    short = load['env']
+    short = load['saltenv']
     if __opts__['hgfs_branch_method'] != 'bookmarks' and short == 'base':
         short = 'default'
     relpath = fnd['rel']
@@ -340,15 +391,24 @@ def file_list(load):
     Return a list of all files on the file server in a specified
     environment
     '''
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
     ret = []
-    if 'env' not in load:
+    if 'saltenv' not in load:
         return ret
-    if __opts__['hgfs_branch_method'] != 'bookmarks' and load['env'] == 'base':
-        load['env'] = 'default'
+    if __opts__['hgfs_branch_method'] != 'bookmarks' and \
+            load['saltenv'] == 'base':
+        load['saltenv'] = 'default'
     repos = init()
     for repo in repos:
         repo.open()
-        ref = _get_ref(repo, load['env'])
+        ref = _get_ref(repo, load['saltenv'])
         if ref:
             manifest = repo.manifest(rev=ref[1])
             for tup in manifest:
@@ -369,15 +429,24 @@ def dir_list(load):
     '''
     Return a list of all directories on the master
     '''
+    if 'env' in load:
+        salt.utils.warn_until(
+            'Boron',
+            'Passing a salt environment should be done using \'saltenv\' '
+            'not \'env\'. This functionality will be removed in Salt Boron.'
+        )
+        load['saltenv'] = load.pop('env')
+
     ret = set()
-    if 'env' not in load:
+    if 'saltenv' not in load:
         return ret
-    if __opts__['hgfs_branch_method'] != 'bookmarks' and load['env'] == 'base':
-        load['env'] = 'default'
+    if __opts__['hgfs_branch_method'] != 'bookmarks' and \
+            load['saltenv'] == 'base':
+        load['saltenv'] = 'default'
     repos = init()
     for repo in repos:
         repo.open()
-        ref = _get_ref(repo, load['env'])
+        ref = _get_ref(repo, load['saltenv'])
         if ref:
             manifest = repo.manifest(rev=ref[1])
             for tup in manifest:

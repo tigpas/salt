@@ -161,11 +161,17 @@ def verify_files(files, user):
         sys.exit(2)
     for fn_ in files:
         dirname = os.path.dirname(fn_)
-        if not os.path.isdir(dirname):
-            os.makedirs(dirname)
-        if not os.path.isfile(fn_):
-            with salt.utils.fopen(fn_, 'w+') as fp_:
-                fp_.write('')
+        try:
+            if not os.path.isdir(dirname):
+                os.makedirs(dirname)
+            if not os.path.isfile(fn_):
+                with salt.utils.fopen(fn_, 'w+') as fp_:
+                    fp_.write('')
+        except OSError as err:
+            msg = 'Failed to create path "{0}" - {1}\n'
+            sys.stderr.write(msg.format(fn_, err))
+            sys.exit(err.errno)
+
         stats = os.stat(fn_)
         if uid != stats.st_uid:
             try:
@@ -289,13 +295,13 @@ def check_user(user):
     try:
         pwuser = pwd.getpwnam(user)
         try:
-            os.setgid(pwuser.pw_gid)
-            os.setuid(pwuser.pw_uid)
             if hasattr(os, 'initgroups'):
                 os.initgroups(user, pwuser.pw_gid)
             else:
                 os.setgroups([e.gr_gid for e in grp.getgrall()
-                              if user in e.gr_mem] + [pwuser.gid]) 
+                              if user in e.gr_mem] + [pwuser.pw_gid])
+            os.setgid(pwuser.pw_gid)
+            os.setuid(pwuser.pw_uid)
 
         except OSError:
             msg = 'Salt configured to run as user "{0}" but unable to switch.'
@@ -450,4 +456,7 @@ def valid_id(opts, id_):
     '''
     Returns if the passed id is valid
     '''
-    return bool(clean_path(opts['pki_dir'], id_))
+    try:
+        return bool(clean_path(opts['pki_dir'], id_))
+    except (AttributeError, KeyError) as e:
+        return False
