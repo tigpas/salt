@@ -8,7 +8,7 @@ from __future__ import absolute_import
 import json
 import pprint
 import logging
-from os import path
+from os import path, readlink
 from functools import wraps
 
 # Import third party libs
@@ -123,7 +123,7 @@ class SaltCacheLoader(BaseLoader):
 
         # pylint: disable=cell-var-from-loop
         for spath in self.searchpath:
-            filepath = path.join(spath, template)
+            filepath = readlink(path.join(spath, template))
             try:
                 with salt.utils.fopen(filepath, 'rb') as ifile:
                     contents = ifile.read().decode(self.encoding)
