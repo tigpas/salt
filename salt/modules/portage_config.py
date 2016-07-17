@@ -5,6 +5,7 @@ Configure ``portage(5)``
 
 # Import python libs
 from __future__ import absolute_import
+import logging
 import os
 import shutil
 
@@ -31,6 +32,7 @@ except ImportError:
             pass
 # pylint: enable=import-error
 
+log = logging.getLogger(__name__)
 
 BASE_PATH = '/etc/portage/package.{0}'
 SUPPORTED_CONFS = ('accept_keywords', 'env', 'license', 'mask', 'properties',
@@ -89,7 +91,11 @@ def _p_to_cp(p):
     Convert a package name or a DEPEND atom to category/package format.
     Raises an exception if program name is ambiguous.
     '''
-    ret = _porttree().dbapi.xmatch("match-all", p)
+    try:
+        ret = _porttree().dbapi.xmatch("match-all", p)
+    except portage.exception.InvalidAtom as iae:
+        log.error('Unable to find a matching package for {0}: ({1})'.format(p, iae))
+        return None
     if ret:
         return portage.cpv_getkey(ret[0])
     return None
