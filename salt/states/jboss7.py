@@ -408,36 +408,35 @@ def __get_artifact(salt_source):
         if 'source' in salt_source:
             try:
                 sfn, source_sum, comment_ = __salt__['file.get_managed'](
-                    name=salt_source['target_file'],
-                    template=None,
-                    source=salt_source['source'],
-                    source_hash=None,
-                    source_hash_name=None,
-                    user=None,
-                    group=None,
-                    mode=None,
-                    saltenv=__env__,
-                    context=None,
-                    defaults=None,
-                    skip_verify=False,
-                    kwargs=None)
+                    salt_source['target_file'],
+                    None,
+                    salt_source['source'],
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    __env__,
+                    None,
+                    None,
+                    False)
 
                 manage_result = __salt__['file.manage_file'](
-                    name=salt_source['target_file'],
-                    sfn=sfn,
-                    ret=None,
-                    source=salt_source['source'],
-                    source_sum=source_sum,
-                    user=None,
-                    group=None,
-                    mode=None,
-                    saltenv=__env__,
-                    backup=None,
-                    makedirs=False,
-                    template=None,
-                    show_diff=True,
-                    contents=None,
-                    dir_mode=None)
+                    salt_source['target_file'],
+                    sfn,
+                    None,
+                    salt_source['source'],
+                    source_sum,
+                    None,
+                    None,
+                    None,
+                    __env__,
+                    None,
+                    False,
+                    None,
+                    True,
+                    None,
+                    None)
 
                 if manage_result['result']:
                     resolved_source = salt_source['target_file']
