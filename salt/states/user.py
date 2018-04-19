@@ -437,9 +437,10 @@ def present(name,
     # First check if a password is set. If password is set, check if
     # hash_password is True, then hash it.
     if password and hash_password:
+        password = __salt__['shadow.gen_password'](password)
         log.debug('Hashing a clear text password')
         # in case a password is already set, it will contain a Salt
-        # which should be re-used to generate the new hash, other-
+        # which should be re-used to generate the new hash for compare, other-
         # wise the Salt will be generated randomly, causing the
         # hash to change each time and thereby making the
         # user.present state non-idempotent.
@@ -452,10 +453,12 @@ def present(name,
         try:
             _, algo, shadow_salt, shadow_hash = __salt__['shadow.info'](name)['passwd'].split('$', 4)
             log.debug('Re-using existing shadow salt for hashing password using {}'.format(algorithms.get(algo)))
-            password = __salt__['shadow.gen_password'](password, crypt_salt=shadow_salt, algorithm=algorithms.get(algo))
+            comparepassword = __salt__['shadow.gen_password'](password, crypt_salt=shadow_salt, algorithm=algorithms.get(algo))
         except ValueError:
             log.info('No existing shadow salt found, defaulting to a randomly generated new one')
-            password = __salt__['shadow.gen_password'](password)
+            comparepassword = password
+    elif password:
+        comparepassword = password
 
     if fullname is not None:
         fullname = sdecode(fullname)
@@ -528,7 +531,7 @@ def present(name,
                            remove_groups,
                            home,
                            createhome,
-                           password,
+                           comparepassword,
                            enforce_password,
                            empty_password,
                            shell,
