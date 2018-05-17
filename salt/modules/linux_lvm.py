@@ -163,9 +163,14 @@ def vgdisplay(vgname=''):
     return ret
 
 
-def lvdisplay(lvname='', quiet=False):
+def lvdisplay(lvname='', quiet=False, select=''):
     '''
     Return information about the logical volume(s)
+
+    .. versionadded:: Develop
+
+    select
+        Select objects for processing and reporting based on specified criteria.
 
     CLI Examples:
 
@@ -173,11 +178,14 @@ def lvdisplay(lvname='', quiet=False):
 
         salt '*' lvm.lvdisplay
         salt '*' lvm.lvdisplay /dev/vg_myserver/root
+        salt '*' lvm.lvdisplay select="lv_size < 1G"
     '''
     ret = {}
     cmd = ['lvdisplay', '-c']
     if lvname:
         cmd.append(lvname)
+    if select:
+        cmd.extend(['-S', select])
     if quiet:
         cmd_ret = __salt__['cmd.run_all'](cmd, python_shell=False, output_loglevel='quiet')
     else:
@@ -482,7 +490,7 @@ def lvremove(lvname, vgname):
 
 def lvresize(size=None, lvpath=None, extents=None):
     '''
-    Return information about the logical volume(s)
+    Resize a logical volume
 
     CLI Examples:
 

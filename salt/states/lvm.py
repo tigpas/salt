@@ -212,6 +212,7 @@ def lv_present(name,
                thinvolume=False,
                thinpool=False,
                force=False,
+               resize=False,
                **kwargs):
     '''
     Create a new logical volume
@@ -251,6 +252,11 @@ def lv_present(name,
     force
         Assume yes to all prompts
 
+    .. versionadded:: Develop
+
+    resize
+        Set to True to resize an exsisting volume (default: False). Ignored if using extents.
+
     '''
     ret = {'changes': {},
            'comment': '',
@@ -270,6 +276,22 @@ def lv_present(name,
 
     if __salt__['lvm.lvdisplay'](lvpath, quiet=True):
         ret['comment'] = 'Logical Volume {0} already present'.format(name)
+
+        if resize and size and __salt__['lvm.lvdisplay'](lvpath, quiet=True, select="lv_size < {0}".format(size)):
+            if __opts__['test']:
+                ret['comment'] = 'Logical Volume {0} is set to be resized'.format(name)
+                ret['result'] = None
+                return ret
+            else:
+                changes = __salt__['lvm.lvresize'](size,
+                                                   "/dev/{0}/{1}".format(vgname,name))
+                if __salt__['lvm.lvdisplay'](lvpath, quiet=True, select="lv_size < {0}".format(size)):
+                    ret['comment'] = 'Failed to resize Logical Volume {0}. Error: {1}'.format(name, changes)
+                    ret['result'] = False
+                else:
+                    ret['comment'] = 'Resized Logical Volume {0}'.format(name)
+                    ret['changes'] = changes
+
     elif __opts__['test']:
         ret['comment'] = 'Logical Volume {0} is set to be created'.format(name)
         ret['result'] = None
