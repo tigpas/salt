@@ -555,6 +555,7 @@ def loaded_ret(ret, loaded, test, debug, compliance_report=False, opts=None):
     # No changes
     ret.update({
         'result': True,
+        'pchanges': {},
         'changes': {}
     })
     return ret
